@@ -1,0 +1,6 @@
+# Allow members of plugdev to open Orbbec and Intel RealSense cameras.
+# Install: sudo cp contrib/60-usb-linkbench.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger
+# The user must be in the plugdev group. Video nodes are usually already in the video group.
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="2bc5", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="8086", MODE="0660", GROUP="plugdev", TAG+="uaccess"
