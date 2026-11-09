@@ -1,6 +1,6 @@
 # usb-linkbench
 
-跨平台的相机 USB 与高速链路测量工具。它面向奥比中光（厂商号 `2BC5`）和 Intel RealSense 这类 UVC 相机，用来回答三件不同的事：
+Linux 上的相机 USB 与高速链路测量工具。它面向奥比中光（厂商号 `2BC5`）和 Intel RealSense 这类 UVC 相机，用来回答三件不同的事：
 
 - 口协商到了哪一档速率
 - 控制传输的回传时间是多少
@@ -8,7 +8,7 @@
 
 CrystalDiskInfo 看的是磁盘健康，不测量这些。本工具是独立项目。
 
-Windows、macOS、Linux 都能运行枚举、预算、控制回传和存储直读。视频载荷只在 Linux 上通过 V4L2 统计，因为另外两个系统的相机会话会改像素格式，解码后的长度不能当作 USB 载荷。
+实现使用 C++20、libusb 和 Linux sysfs。视频载荷通过 V4L2 mmap 统计驱动交出的 `bytesused`。预算和 `report` 打印的测试项说明不需要打开设备。
 
 ## 数字不要混读
 
@@ -22,12 +22,13 @@ Windows、macOS、Linux 都能运行枚举、预算、控制回传和存储直�
 | `bulk` | Bulk IN | 可占用的 Bulk IN 端点已完成的字节 |
 | `storage` | 直接读 | 绕过页缓存的顺序读 |
 | `timing-check` | 计时自检 | 时钟地板和一次 50 ms 睡眠，不是 USB 结果 |
+| `report` | 测试项 | 上行 / 下行口、相机 640×480 保深度、VUT 120 Hz、PEAK-CAN 60 Hz、供电能力与并发验收各参数的含义 |
 
 做不到时命令会失败或跳过，并写明原因。不会把 5 Gbit/s 填成实测吞吐。
 
 ## 计时
 
-Linux 和 macOS 使用 `CLOCK_MONOTONIC_RAW`。Windows 使用 `QueryPerformanceCounter`。预热样本丢弃。吞吐的分母是测到的墙钟，不是请求的秒数。计时开销单独列出，不从样本里扣除。
+计时使用 `CLOCK_MONOTONIC_RAW`。预热样本丢弃。吞吐的分母是测到的墙钟，不是请求的秒数。计时开销单独列出，不从样本里扣除。
 
 `rtt` 的每个样本是一笔控制传输，包含一次系统调用。这是应用程序看到的回传，不是协议分析仪上的线级时间。
 
@@ -35,12 +36,15 @@ Linux 和 macOS 使用 `CLOCK_MONOTONIC_RAW`。Windows 使用 `QueryPerformanceC
 
 ## 构建
 
+依赖 `cmake`、`pkg-config` 和 `libusb-1.0-dev`。
+
 ```sh
-cargo build --release
-cargo test
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-发布二进制是 `target/release/usb-linkbench`。
+二进制是 `build/usb-linkbench`。
 
 Linux 上打开设备节点需要写权限。奥比中光和 RealSense 的 udev 示例在 `contrib/60-usb-linkbench.rules`。视频节点通常还要求用户在 `video` 组。
 
@@ -70,6 +74,9 @@ usb-linkbench bulk --vid 1234 --pid 5678 --interface 0 --endpoint 0x81 --seconds
 
 usb-linkbench links
 usb-linkbench timing-check
+
+# 端口与供电的测试项，以及每个参数的含义
+usb-linkbench report
 ```
 
 `--json` 把同一次结果打成 JSON。退出码 `1` 是命令失败，`2` 是测完了但判定没过，例如 `timing-check` 的睡眠异常，或 `stream` / `run --strict` 的帧率、帧字节不合格。
