@@ -96,3 +96,4 @@ MIT OR Apache-2.0。见 `LICENSE-MIT` 和 `LICENSE-APACHE`。
 ## English
 
 usb-linkbench measures negotiated USB, Thunderbolt, and PCIe link state, USB control round-trip, and, on Linux, V4L2 payload goodput for Orbbec and RealSense cameras. Descriptor ceilings and uncompressed frame budgets are labeled as planning numbers. The tool does not report a link rate as measured throughput.
+# usb-linkbench
