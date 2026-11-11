@@ -18,7 +18,7 @@ CrystalDiskInfo 看的是磁盘健康，不测量这些。本工具是独立项�
 | `audit` | 描述符上限 | 由端点描述符和服务间隔算出的周期端点预算 |
 | `budget` | 帧预算 | `宽 × 高 × 每像素字节 × 帧率`，再和规范上限比较 |
 | `rtt` | 控制回传 | 一次 `GET_STATUS` 从提交前到完成的单调时钟间隔 |
-| `stream` / `run` | 视频载荷 | Linux V4L2 `bytesused` 除以实测墙钟 |
+| `stream` / `run` | 视频载荷 | Linux V4L2 `bytesused` 除以实测墙钟。`stream --profile quick` 重复短采并取最高；`--profile stress` 用浅队列长时间采，取最低并检查丢帧 |
 | `bulk` | Bulk IN | 可占用的 Bulk IN 端点已完成的字节 |
 | `storage` | 直接读 | 绕过页缓存的顺序读 |
 | `timing-check` | 计时自检 | 时钟地板和一次 50 ms 睡眠，不是 USB 结果 |
@@ -32,11 +32,11 @@ CrystalDiskInfo 看的是磁盘健康，不测量这些。本工具是独立项�
 
 `rtt` 的每个样本是一笔控制传输，包含一次系统调用。这是应用程序看到的回传，不是协议分析仪上的线级时间。
 
-`stream` 直接对内核 V4L2 做 mmap，不经过 libv4lconvert。`bytesused` 是驱动交出的帧，不含 UVC 包头和 8b/10b 编码。多路 `/dev/video` 会在预热后同时进入计时窗，合计是各路窗内速率之和。
+`stream` 直接对内核 V4L2 做 mmap，不经过 libv4lconvert。`bytesused` 是驱动交出的帧，不含 UVC 包头和总线编码。多路 `/dev/video` 会在预热后同时进入计时窗，合计是各路窗内速率之和。`stream --color-depth` 给彩色和深度各自设格式：深度取驱动列出的未压缩模式里预算最高的一档，彩色用同帧率的 MJPEG 陪跑。奥比中光保留深度时两路必须一起开。结果里的深度速率只算深度那一路。
 
 ## 构建
 
-依赖 `cmake`、`pkg-config` 和 `libusb-1.0-dev`。
+依赖 `cmake`、`pkg-config` 和 `libusb-1.0-dev`。可选图形看板需要 Qt Widgets（优先 `qt6-base-dev`，没有 Qt6 时回退到 `qtbase5-dev`）。
 
 ```sh
 cmake -S . -B build
@@ -44,7 +44,12 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-二进制是 `build/usb-linkbench`。
+二进制是 `build/usb-linkbench`。有 Qt 时还会生成 `build/usb-linkbench-gui`。不要 GUI 时加 `-DBUILD_GUI=OFF`。
+
+```sh
+# 原生测速看板：相机 / 链路 / RTT / 视频载荷 / U 盘直读
+./build/usb-linkbench-gui
+```
 
 Linux 上打开设备节点需要写权限。奥比中光和 RealSense 的 udev 示例在 `contrib/60-usb-linkbench.rules`。视频节点通常还要求用户在 `video` 组。
 
@@ -62,6 +67,15 @@ usb-linkbench rtt --vid 8086 --pid 0b3a --count 200
 
 # 已有的 V4L2 节点。不改格式时测当前模式
 usb-linkbench stream --device /dev/video0 --seconds 5
+
+# 快速性能：3 次 × 5 s，队列 8，取得分最高的一次
+usb-linkbench stream --device /dev/video0 --profile quick
+
+# 压力测试：3 次 × 10 s，队列 2，取得分最低的一次。丢帧超过 1%、停滞或错误帧时退出码为 2
+usb-linkbench stream --device /dev/video0 --profile stress
+
+# 彩色和深度一起开。深度选未压缩预算最高的模式，表上单列深度速率
+usb-linkbench stream --vid 2bc5 --color-depth --seconds 5
 
 # 未压缩 1080p30 在 USB 2.0 上等时端点放不下，在 USB 3.0 上放得下
 usb-linkbench budget --preset d435-color-1920x1080-yuyv-30 --speed 5000

@@ -59,6 +59,23 @@ linkbench::RawDevice device(const char* name, std::uint32_t bus, double speed, s
 }  // namespace
 
 int main() {
+    CHECK(std::string(linkbench::usb_standard(linkbench::LinkSpeed::Super).name) == "USB 3.0");
+    CHECK(linkbench::usb_standard(linkbench::LinkSpeed::Super).meets_usb3);
+    CHECK(linkbench::usb_standard(linkbench::LinkSpeed::SuperPlus10).meets_usb3);
+    CHECK(std::string(linkbench::usb_standard(linkbench::LinkSpeed::SuperPlus10).name) == "USB 3.1");
+    CHECK(std::string(linkbench::usb_standard(linkbench::LinkSpeed::High).name) == "USB 2.0");
+    CHECK(!linkbench::usb_standard(linkbench::LinkSpeed::High).meets_usb3);
+    const char* mounts =
+        "22 1 8:1 / /media/disk rw,relatime - vfat /dev/sdb1 rw\n"
+        "23 1 259:2 / /media/disk/sub rw - ext4 /dev/nvme0n1p2 rw\n"
+        "24 1 8:17 / /media/usb\\040stick rw - vfat /dev/sdc1 rw\n";
+    const auto disk = linkbench::mount_majmin(mounts, "/media/disk/file");
+    const auto nested = linkbench::mount_majmin(mounts, "/media/disk/sub/a");
+    const auto spaced = linkbench::mount_majmin(mounts, "/media/usb stick/a.bin");
+    CHECK(disk && *disk == "8:1");
+    CHECK(nested && *nested == "259:2");
+    CHECK(spaced && *spaced == "8:17");
+
     CHECK(linkbench::line_coding_payload_bytes_per_sec(linkbench::LinkSpeed::Super) == 500000000);
     CHECK(linkbench::default_one_isoc_endpoint_bytes_per_sec(linkbench::LinkSpeed::High) == 24576000);
     CHECK(linkbench::default_one_isoc_endpoint_bytes_per_sec(linkbench::LinkSpeed::Super) == 393216000);
@@ -182,6 +199,148 @@ int main() {
     packet = linkbench::decode_packet(0x0400, 5000);
     CHECK(packet.first == 1024 && packet.second == 1);
     CHECK(std::string(linkbench::hid_kind(1, 2)) == "boot mouse");
+
+    const auto quick = linkbench::stream_bench_plan("quick");
+    CHECK(quick.passes == 3 && quick.seconds == 5 && quick.buffers == 8 && quick.keep_maximum);
+    const auto stress = linkbench::stream_bench_plan("stress");
+    CHECK(stress.passes == 3 && stress.seconds == 10 && stress.buffers == 2 && !stress.keep_maximum);
+    CHECK(stress.fail_on_stream_errors && stress.max_drop_ratio == 0.01);
+    bool unknown = false;
+    try {
+        linkbench::stream_bench_plan("rnd4k");
+    } catch (const linkbench::Error&) {
+        unknown = true;
+    }
+    CHECK(unknown);
+
+    linkbench::StreamPassSample slow{100.0 * 1024 * 1024, 30, 150, 0, 0, 0, false};
+    linkbench::StreamPassSample peak{180.0 * 1024 * 1024, 30, 150, 0, 0, 0, false};
+    linkbench::StreamPassSample mid{120.0 * 1024 * 1024, 29, 98, 2, 0, 0, false};
+    auto best = linkbench::score_stream_passes(quick, {slow, peak, mid});
+    CHECK(best.pass_index == 2 && best.bytes_per_sec == peak.bytes_per_sec && !best.failed);
+
+    auto worst = linkbench::score_stream_passes(stress, {slow, peak, mid});
+    CHECK(worst.pass_index == 1 && worst.bytes_per_sec == slow.bytes_per_sec);
+    CHECK(!worst.failed);
+
+    linkbench::StreamPassSample dropped = mid;
+    dropped.frames = 90;
+    dropped.dropped_frames = 10;
+    auto pressured = linkbench::score_stream_passes(stress, {slow, peak, dropped});
+    CHECK(pressured.failed);
+    CHECK(pressured.reason.find("丢帧比例 2.50% 超过 1.00%") != std::string::npos);
+    CHECK(pressured.pass_index == 1);
+
+    linkbench::StreamPassSample exact = slow;
+    exact.frames = 99;
+    exact.dropped_frames = 1;
+    auto boundary = linkbench::score_stream_passes(stress, {exact});
+    CHECK(!boundary.failed && std::abs(boundary.drop_ratio - 0.01) < 1e-12);
+
+    linkbench::StreamPassSample stalled = slow;
+    stalled.stalled = true;
+    stalled.error_frames = 2;
+    auto broken = linkbench::score_stream_passes(stress, {stalled});
+    CHECK(broken.failed);
+    CHECK(broken.reason.find("停滞 1 次") != std::string::npos);
+    CHECK(broken.reason.find("错误帧 2") != std::string::npos);
+    auto quick_ignores = linkbench::score_stream_passes(quick, {stalled});
+    CHECK(!quick_ignores.failed);
+
+    auto with_floor = stress;
+    with_floor.min_fps = 31;
+    auto slow_fps = linkbench::score_stream_passes(with_floor, {slow});
+    CHECK(slow_fps.failed && slow_fps.reason.find("帧率 30.00 低于 31.00") != std::string::npos);
+
+    linkbench::StreamBenchReport shown;
+    shown.plan = quick;
+    linkbench::StreamReport round;
+    round.aggregate_bytes_per_sec = peak.bytes_per_sec;
+    linkbench::FrameStream frame;
+    frame.window_fps = 30;
+    frame.frames = 150;
+    round.streams.push_back(frame);
+    shown.passes = {round, round};
+    shown.score = linkbench::score_stream_passes(quick, {slow, peak});
+    shown.notes.push_back("记分说明");
+    const auto bench_text = linkbench::text_stream_bench(shown);
+    CHECK(bench_text.find("快速性能") != std::string::npos);
+    CHECK(bench_text.find("取最高") != std::string::npos);
+    CHECK(bench_text.find("判定: 通过") != std::string::npos);
+    CHECK(bench_text.find("注: 记分说明") != std::string::npos);
+    const auto json = linkbench::json_stream_bench(shown);
+    CHECK(json.find("\"profile\":\"quick\"") != std::string::npos);
+    CHECK(json.find("\"failed\":false") != std::string::npos);
+
+    bool empty = false;
+    try {
+        linkbench::score_stream_passes(quick, {});
+    } catch (const linkbench::Error&) {
+        empty = true;
+    }
+    CHECK(empty);
+
+    linkbench::VideoMode vga_depth{640, 480, "Z16", 30, 2};
+    linkbench::VideoMode wide_depth{1280, 800, "Y16", 30, 2};
+    linkbench::VideoMode fast_depth{640, 480, "Z16", 60, 2};
+    CHECK(wide_depth.payload_bytes_per_sec() == 1280ull * 800 * 2 * 30);
+    const auto deepest = linkbench::pick_depth_mode({vga_depth, fast_depth, wide_depth});
+    CHECK(deepest.width == 1280 && deepest.height == 800 && deepest.fourcc == "Y16" && deepest.fps == 30);
+
+    linkbench::VideoMode mjpg_hd{1920, 1080, "MJPG", 30, 0};
+    linkbench::VideoMode mjpg_vga{640, 480, "MJPG", 30, 0};
+    linkbench::VideoMode mjpg_slow{640, 480, "MJPG", 15, 0};
+    linkbench::VideoMode yuyv_hd{1920, 1080, "YUYV", 30, 2};
+    const auto color_mode = linkbench::pick_color_mode({mjpg_hd, yuyv_hd, mjpg_slow, mjpg_vga}, 30);
+    CHECK(color_mode.fourcc == "MJPG" && color_mode.width == 640 && color_mode.height == 480 && color_mode.fps == 30);
+    linkbench::VideoMode yuyv_wide{848, 480, "YUYV", 90, 2};
+    linkbench::VideoMode yuyv_vga{640, 480, "YUYV", 90, 2};
+    const auto matched = linkbench::pick_color_mode({yuyv_vga, yuyv_wide}, 90, 848, 480);
+    CHECK(matched.width == 848 && matched.height == 480 && matched.fps == 90);
+
+    linkbench::NodeModes depth_node;
+    depth_node.path = "/dev/video0";
+    depth_node.kind = linkbench::StreamKind::Depth;
+    depth_node.modes = {vga_depth, wide_depth};
+    linkbench::NodeModes color_node;
+    color_node.path = "/dev/video6";
+    color_node.kind = linkbench::StreamKind::Color;
+    color_node.modes = {mjpg_hd, mjpg_vga, yuyv_hd};
+    const auto planned = linkbench::plan_color_depth({color_node, depth_node});
+    CHECK(planned.depth_node == "/dev/video0" && planned.color_node == "/dev/video6");
+    CHECK(planned.depth_budget_bytes_per_sec == 1280ull * 800 * 2 * 30);
+    CHECK(planned.color_mode.fourcc == "MJPG" && planned.color_mode.width == 640);
+    CHECK(planned.request.strict_nodes && planned.request.paths.size() == 2);
+    CHECK(planned.request.node_formats.size() == 2);
+    bool depth_expect = false;
+    for (const auto& format : planned.request.node_formats) {
+        if (format.role == "depth") {
+            depth_expect = format.expect_frame_bytes && *format.expect_frame_bytes == 1280ull * 800 * 2;
+        }
+        if (format.role == "color") CHECK(!format.expect_frame_bytes);
+    }
+    CHECK(depth_expect);
+    bool exceeds_usb2 = false;
+    bool under_hundred = false;
+    for (const auto& note : planned.request.notes) {
+        if (note.find("超过 USB 2.0") != std::string::npos) exceeds_usb2 = true;
+        if (note.find("不到 100") != std::string::npos) under_hundred = true;
+    }
+    CHECK(exceeds_usb2 && !under_hundred);
+
+    depth_node.modes = {vga_depth};
+    const auto modest = linkbench::plan_color_depth({depth_node, color_node});
+    CHECK(modest.depth_budget_bytes_per_sec == 640ull * 480 * 2 * 30);
+    CHECK(modest.depth_budget_bytes_per_sec * 8 > 100'000'000ull);
+    bool modest_exceeds = false;
+    for (const auto& note : modest.request.notes) {
+        if (note.find("超过 USB 2.0") != std::string::npos) modest_exceeds = true;
+    }
+    CHECK(!modest_exceeds);
+    const auto* gemini = linkbench::find_preset("gemini305-depth-1280x800-y16-30");
+    CHECK(gemini && gemini->payload_bytes_per_sec() == 1280ull * 800 * 2 * 30);
+    const auto* gemini_vga = linkbench::find_preset("gemini305-depth-640x480-z16-30");
+    CHECK(gemini_vga && gemini_vga->payload_bytes_per_sec() == 640ull * 480 * 2 * 30);
 
     if (failures) {
         std::cerr << failures << " 项失败\n";

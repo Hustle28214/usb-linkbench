@@ -676,9 +676,6 @@ BenchReport assemble(std::vector<RawDevice> raws, std::vector<CanPort> can, std:
     }
     report.can = std::move(can);
     report.power = power_section(std::move(rails));
-    report.notes = {"上行口是每条 SuperSpeed 总线上路径最短的集线器。更深的集线器和 SuperSpeed 功能设备算下行口。",
-                    "HID 只收协商速率低于 5 Gbit/s、且有 HID 接口的设备。串口只收同一速率范围内的 CDC ACM、常见 USB 串口驱动，或已经出现 tty 的接口。",
-                    "CAN 读网口类型 280 以及 can_bittiming。没有口就记未接入，不填 0 bit/s。"};
     return report;
 }
 

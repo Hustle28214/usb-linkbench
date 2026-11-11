@@ -33,3 +33,36 @@ target_compile_options(linkbench-tests PRIVATE -Wall -Wextra -Wpedantic)
 
 enable_testing()
 add_test(NAME unit COMMAND linkbench-tests)
+
+option(BUILD_GUI "Build Qt Widgets dashboard (usb-linkbench-gui)" ON)
+if(BUILD_GUI)
+    set(CMAKE_AUTOMOC ON)
+    find_package(Qt6 QUIET COMPONENTS Widgets)
+    if(Qt6_FOUND)
+        set(LINKBENCH_QT_TARGET Qt6::Widgets)
+        message(STATUS "Building GUI with Qt6")
+    else()
+        find_package(Qt5 QUIET COMPONENTS Widgets)
+        if(Qt5_FOUND)
+            set(LINKBENCH_QT_TARGET Qt5::Widgets)
+            message(STATUS "Building GUI with Qt5 (Qt6 not found)")
+        endif()
+    endif()
+
+    if(LINKBENCH_QT_TARGET)
+        add_executable(usb-linkbench-gui
+            src/gui/main.cpp
+            src/gui/main_window.cpp
+            src/gui/main_window.hpp
+            src/gui/measure_worker.cpp
+            src/gui/measure_worker.hpp
+            src/gui/speed_gauge.cpp
+            src/gui/speed_gauge.hpp
+        )
+        target_include_directories(usb-linkbench-gui PRIVATE src/gui)
+        target_link_libraries(usb-linkbench-gui PRIVATE linkbench ${LINKBENCH_QT_TARGET})
+        target_compile_options(usb-linkbench-gui PRIVATE -Wall -Wextra -Wpedantic)
+    else()
+        message(WARNING "BUILD_GUI=ON but neither Qt6 nor Qt5 Widgets was found; skip usb-linkbench-gui. Install qt6-base-dev (preferred) or qtbase5-dev, or pass -DBUILD_GUI=OFF.")
+    endif()
+endif()

@@ -106,8 +106,6 @@ RunOutcome run_camera(const RunRequest& request) {
             outcome.text += "  " + text_budget(BudgetReport{{}, planning.aggregate_bytes_per_sec, {}, planning.highlighted, {}} );
         }
     }
-    outcome.text += "注: audit 和 rtt 在打开控制通道后会关掉，再开始码流，避免占住视频接口。\n";
-    outcome.text += "注: 码流失败或本机没有 V4L2 时，该项为 skipped/failed，不改写其他实测。\n";
     if (outcome.checks_failed) outcome.text += "检查未通过\n";
     return outcome;
 }

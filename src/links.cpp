@@ -101,8 +101,6 @@ LinksReport links(bool verbose) {
     }
     for (const auto& [speed, count] : counts) report.pcie_speed_counts.emplace_back(speed, count);
     if (verbose) report.pcie_all = std::move(functions);
-    report.notes = {"Thunderbolt 的 tx_speed/rx_speed 和 PCIe 的 current_link_speed 都是已训练链路，不是吞吐。",
-                    "degraded 表示当前速率或宽度低于该功能号声明的最大值。空闲链路常会降到 2.5 GT/s，这不一定是故障。"};
     return report;
 }
 

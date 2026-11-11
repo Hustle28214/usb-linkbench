@@ -135,7 +135,8 @@ void usage() {
         "  list [--vid --pid --bus --addr --cameras]\n"
         "  audit [过滤]\n"
         "  rtt [过滤] [--count 100 --warmup 20 --timeout-ms 200 --samples]\n"
-        "  stream [--device PATH] [--seconds 5 --warmup-frames 30 --width --height --fourcc --fps --min-fps --expect-frame-bytes --preset]\n"
+        "  stream [--device PATH] [--color-depth] [--profile quick|stress] [--seconds --passes --interval --buffers --max-drop-ratio]\n"
+        "         [--warmup-frames 30 --width --height --fourcc --fps --min-fps --expect-frame-bytes --preset]\n"
         "  budget [--preset --width --height --bpp --fps --speed]\n"
         "  storage --path PATH [--seconds 5 --block-kib 1024 --warmup-mib 4]\n"
         "  bulk [过滤] --interface N --endpoint 0x81 [--seconds 2 --buf-kib 64 --warmup 4 --timeout-ms 500 --detach]\n"
@@ -178,8 +179,29 @@ int main(int argc, char** argv) {
             auto devices = cli.repeat("--device");
             auto presets = load_presets(cli.repeat("--preset"));
             const bool explicit_nodes = !devices.empty();
+            const bool color_depth = cli.flag("--color-depth");
+            auto profile_name = cli.option("--profile");
+            std::optional<linkbench::StreamBenchPlan> plan;
+            if (profile_name) plan = linkbench::stream_bench_plan(*profile_name);
             linkbench::CaptureRequest request;
-            request.seconds = cli.number("--seconds", 5);
+            if (auto seconds = cli.option("--seconds")) {
+                const auto value = std::stod(*seconds);
+                request.seconds = value;
+                if (plan) plan->seconds = value;
+            } else if (plan) {
+                request.seconds = plan->seconds;
+            } else {
+                request.seconds = 5;
+            }
+            if (plan) {
+                if (auto passes = cli.option("--passes")) plan->passes = static_cast<std::uint32_t>(std::stoul(*passes));
+                if (auto interval = cli.option("--interval")) plan->interval_seconds = std::stod(*interval);
+                if (auto buffers = cli.option("--buffers")) plan->buffers = static_cast<std::uint32_t>(std::stoul(*buffers));
+                if (auto ratio = cli.option("--max-drop-ratio")) plan->max_drop_ratio = std::stod(*ratio);
+                request.buffers = plan->buffers;
+            } else if (auto buffers = cli.option("--buffers")) {
+                request.buffers = static_cast<std::uint32_t>(std::stoul(*buffers));
+            }
             request.warmup_frames = cli.u32("--warmup-frames", 30);
             if (auto width = cli.option("--width")) request.width = static_cast<std::uint32_t>(std::stoul(*width));
             if (auto height = cli.option("--height")) request.height = static_cast<std::uint32_t>(std::stoul(*height));
@@ -191,17 +213,48 @@ int main(int argc, char** argv) {
             if (format_bits && !(request.width && request.height && request.fourcc)) {
                 throw linkbench::Error("设置格式时 width、height、fourcc 要一起给");
             }
-            if (devices.empty()) devices = linkbench::video_nodes_for(filter_from(cli));
-            else filter_from(cli);
-            if (devices.size() == 1 && presets.size() == 1) {
-                if (!request.min_fps) request.min_fps = static_cast<double>(presets[0]->fps) * 0.95;
-                if (!request.expect_frame_bytes) request.expect_frame_bytes = presets[0]->payload_bytes_per_frame();
+            if (color_depth) {
+                if (request.width || request.height || request.fourcc || request.fps || !presets.empty()) {
+                    throw linkbench::Error("--color-depth 会分别为彩色和深度设置格式，不要同时给 --width、--height、--fourcc、--fps 或 --preset");
+                }
+                if (!explicit_nodes) {
+                    auto listed = linkbench::list_devices(filter_from(cli));
+                    std::vector<linkbench::DeviceRecord> cameras;
+                    for (const auto& device : listed.devices) {
+                        if (!device.video_nodes.empty()) cameras.push_back(device);
+                    }
+                    if (cameras.empty()) throw linkbench::Error("没有带视频节点的相机");
+                    if (cameras.size() > 1) {
+                        throw linkbench::Error("有多台相机，--color-depth 请用 --vid、--bus 或 --addr 指定一台");
+                    }
+                    devices = cameras.front().video_nodes;
+                } else {
+                    filter_from(cli);
+                }
+                auto planned = linkbench::plan_color_depth(linkbench::describe_capture_nodes(devices));
+                planned.request.seconds = request.seconds;
+                planned.request.warmup_frames = request.warmup_frames;
+                planned.request.buffers = request.buffers;
+                request = std::move(planned.request);
+            } else {
+                if (devices.empty()) devices = linkbench::video_nodes_for(filter_from(cli));
+                else filter_from(cli);
+                if (devices.size() == 1 && presets.size() == 1) {
+                    if (!request.min_fps) request.min_fps = static_cast<double>(presets[0]->fps) * 0.95;
+                    if (!request.expect_frame_bytes) request.expect_frame_bytes = presets[0]->payload_bytes_per_frame();
+                }
+                request.paths = devices;
+                request.strict_nodes = explicit_nodes;
             }
-            request.paths = devices;
-            request.strict_nodes = explicit_nodes;
-            auto report = linkbench::capture(request);
-            emit(cli.json, linkbench::text_stream(report), linkbench::json_stream(report));
-            if (linkbench::verdict_failed(report)) g_exit = 2;
+            if (plan) {
+                auto report = linkbench::benchmark_stream(request, *plan);
+                emit(cli.json, linkbench::text_stream_bench(report), linkbench::json_stream_bench(report));
+                if (report.score.failed) g_exit = 2;
+            } else {
+                auto report = linkbench::capture(request);
+                emit(cli.json, linkbench::text_stream(report), linkbench::json_stream(report));
+                if (linkbench::verdict_failed(report)) g_exit = 2;
+            }
         } else if (command == "budget") {
             auto presets = load_presets(cli.repeat("--preset"));
             std::vector<std::string> labels;
@@ -248,6 +301,7 @@ int main(int argc, char** argv) {
             options.block_bytes = static_cast<std::size_t>(block_kib) * 1024;
             options.warmup_bytes = static_cast<std::uint64_t>(cli.u32("--warmup-mib", 4)) * 1024 * 1024;
             auto report = linkbench::read_direct(options);
+            report.link = linkbench::storage_usb(options.path);
             emit(cli.json, linkbench::text_storage(report), linkbench::json_storage(report));
         } else if (command == "bulk") {
             linkbench::BulkOptions options;

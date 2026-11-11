@@ -149,12 +149,19 @@ std::string text_bulk(const BulkReport& report) {
     return out;
 }
 
+std::string role_label(const std::string& role) {
+    if (role == "depth") return "深度";
+    if (role == "color") return "彩色";
+    return role;
+}
+
 std::string text_stream(const StreamReport& report) {
     std::string out = "视频载荷  合计 " + fmt_bytes_per_sec(report.aggregate_bytes_per_sec) + "\n";
     for (const auto& item : report.streams) {
         std::ostringstream line;
         line.setf(std::ios::fixed);
         line.precision(2);
+        if (!item.role.empty()) line << role_label(item.role) << "  ";
         line << item.node << "  " << item.card << " " << item.width << "x" << item.height << " " << item.fourcc << "  "
              << item.window_fps << " fps  " << fmt_bytes_per_sec(item.window_bytes_per_sec) << "  帧 " << item.frames
              << "  丢帧 " << item.dropped_frames << "  用时 ";
@@ -181,6 +188,58 @@ std::string text_stream(const StreamReport& report) {
     return out;
 }
 
+std::string text_stream_bench(const StreamBenchReport& report) {
+    std::ostringstream head;
+    head.setf(std::ios::fixed);
+    head.precision(2);
+    bool depth_score = false;
+    if (report.score.pass_index > 0 && report.score.pass_index <= report.passes.size()) {
+        for (const auto& stream : report.passes[report.score.pass_index - 1].streams) {
+            if (stream.role == "depth") depth_score = true;
+        }
+    }
+    head << report.plan.title << "  " << (depth_score ? "深度 " : "") << (report.plan.keep_maximum ? "得分 " : "下限 ")
+         << fmt_bytes_per_sec(report.score.bytes_per_sec) << "  第 " << report.score.pass_index << "/"
+         << report.plan.passes << " 次（" << (report.plan.keep_maximum ? "取最高" : "取最低") << "）  " << report.score.fps
+         << " fps\n";
+    head.precision(1);
+    head << "队列 " << report.plan.buffers << "  每次 " << report.plan.seconds << " s  次数 " << report.plan.passes
+         << "  间隔 " << report.plan.interval_seconds << " s\n";
+    std::string out = head.str();
+    for (std::size_t i = 0; i < report.passes.size(); ++i) {
+        const auto& pass = report.passes[i];
+        double fps = 0;
+        std::uint64_t frames = 0;
+        std::uint64_t dropped = 0;
+        bool stalled = false;
+        for (const auto& stream : pass.streams) {
+            fps += stream.window_fps;
+            frames += stream.frames;
+            dropped += stream.dropped_frames;
+            stalled = stalled || stream.stalled;
+        }
+        std::ostringstream line;
+        line.setf(std::ios::fixed);
+        line.precision(2);
+        line << "  " << (i + 1) << "  " << fmt_bytes_per_sec(pass.aggregate_bytes_per_sec) << "  " << fps << " fps  帧 "
+             << frames << "  丢帧 " << dropped << "  停滞 " << (stalled ? "true" : "false") << "\n";
+        out += line.str();
+        for (const auto& stream : pass.streams) {
+            std::ostringstream detail;
+            detail.setf(std::ios::fixed);
+            detail.precision(2);
+            detail << "    ";
+            if (!stream.role.empty()) detail << role_label(stream.role) << "  ";
+            detail << stream.node << "  " << stream.width << "x" << stream.height << " " << stream.fourcc << "  "
+                   << stream.window_fps << " fps  " << fmt_bytes_per_sec(stream.window_bytes_per_sec) << "\n";
+            out += detail.str();
+        }
+    }
+    out += std::string("判定: ") + (report.score.failed ? "未过  " + report.score.reason : "通过") + "\n";
+    push_notes(out, report.notes);
+    return out;
+}
+
 std::string text_storage(const StorageReport& report) {
     std::ostringstream elapsed;
     elapsed.setf(std::ios::fixed);
@@ -188,6 +247,15 @@ std::string text_storage(const StorageReport& report) {
     elapsed << (static_cast<double>(report.elapsed_ns) / 1e9);
     std::string out = "直接读  " + report.path + "\n" + fmt_bytes_per_sec(report.bytes_per_sec) + "  字节 " +
                       std::to_string(report.bytes) + "  用时 " + elapsed.str() + " s  圈数 " + std::to_string(report.wraps) + "\n";
+    if (report.link.usb) {
+        const auto standard = usb_standard(report.link.speed);
+        out += std::string("标准  ") + standard.name + "  " + (standard.meets_usb3 ? "符合 USB 3.0" : "未到 USB 3.0") + "  协商 " +
+               speed_name(report.link.speed);
+        if (!report.link.product.empty()) out += "  " + report.link.product;
+        out += "\n";
+    } else if (!report.link.detail.empty()) {
+        out += "标准  " + report.link.detail + "\n";
+    }
     push_notes(out, report.notes);
     return out;
 }
@@ -253,10 +321,27 @@ std::string json_stream(const StreamReport& report) {
     for (std::size_t i = 0; i < report.streams.size(); ++i) {
         const auto& item = report.streams[i];
         if (i) os << ",";
-        os << "{\"node\":" << q(item.node) << ",\"fourcc\":" << q(item.fourcc) << ",\"width\":" << item.width
+        os << "{\"node\":" << q(item.node) << ",\"role\":" << q(item.role) << ",\"fourcc\":" << q(item.fourcc)
+           << ",\"width\":" << item.width
            << ",\"height\":" << item.height << ",\"frames\":" << item.frames << ",\"bytes\":" << item.bytes
            << ",\"elapsed_ns\":" << item.elapsed_ns << ",\"window_fps\":" << item.window_fps
            << ",\"window_bytes_per_sec\":" << item.window_bytes_per_sec << "}";
+    }
+    os << "]}";
+    return os.str();
+}
+
+std::string json_stream_bench(const StreamBenchReport& report) {
+    std::ostringstream os;
+    os << "{\"profile\":" << q(report.plan.id) << ",\"keep_maximum\":" << (report.plan.keep_maximum ? "true" : "false")
+       << ",\"passes\":" << report.plan.passes << ",\"seconds\":" << report.plan.seconds
+       << ",\"buffers\":" << report.plan.buffers << ",\"pass_index\":" << report.score.pass_index
+       << ",\"bytes_per_sec\":" << report.score.bytes_per_sec << ",\"fps\":" << report.score.fps
+       << ",\"drop_ratio\":" << report.score.drop_ratio << ",\"failed\":" << (report.score.failed ? "true" : "false")
+       << ",\"reason\":" << q(report.score.reason) << ",\"rounds\":[";
+    for (std::size_t i = 0; i < report.passes.size(); ++i) {
+        if (i) os << ",";
+        os << "{\"bytes_per_sec\":" << report.passes[i].aggregate_bytes_per_sec << "}";
     }
     os << "]}";
     return os.str();

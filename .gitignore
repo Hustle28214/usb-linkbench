@@ -3,3 +3,7 @@
 /.cargo
 /drafts
 **/*.rs.bk
+/docs
+/results
+/drafts
+/.cursor

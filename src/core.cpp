@@ -91,7 +91,7 @@ std::uint64_t now_ns() {
 #if defined(__unix__)
     timespec ts{};
     if (clock_gettime(4, &ts) != 0) {
-        clock_gettime(CLOCK_MONOTONIC, &ts);
+        clock_gettime(CLOCK_MONOTONIC, &ts);// 类UNIX系统才奏效，WIN系统用不了，且如果改用QueryPerformanceCounter语义上有一点区别。
     }
     return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
 #elif defined(_WIN32)
@@ -132,8 +132,6 @@ TimingReport timing_check() {
     report.sleep_requested_ns = requested;
     report.sleep_measured_ns = measured;
     report.sleep_ok = measured >= 20'000'000ull && measured <= 1'000'000'000ull;
-    report.notes = {"开销是连续两次读钟的差值，表示测量地板，不从其他样本里扣除。",
-                    "睡眠检查只确认时钟没有明显停走或跳变，不是 USB 结果。"};
     return report;
 }
 
@@ -231,6 +229,26 @@ LinkSpeed speed_from_mbps(double mbps) {
     if (mbps >= 12) return LinkSpeed::Full;
     if (mbps > 0) return LinkSpeed::Low;
     return LinkSpeed::Unknown;
+}
+
+UsbStandard usb_standard(LinkSpeed speed) {
+    switch (speed) {
+        case LinkSpeed::Super:
+            return {"USB 3.0", true};
+        case LinkSpeed::SuperPlus10:
+            return {"USB 3.1", true};
+        case LinkSpeed::SuperPlus20:
+            return {"USB 3.2", true};
+        case LinkSpeed::High:
+            return {"USB 2.0", false};
+        case LinkSpeed::Full:
+            return {"USB 1.1", false};
+        case LinkSpeed::Low:
+            return {"低速", false};
+        case LinkSpeed::Unknown:
+            return {"未知", false};
+    }
+    return {"未知", false};
 }
 
 std::optional<LinkSpeed> speed_from_name(const std::string& text) {
@@ -349,6 +367,8 @@ const std::vector<ModeBudget>& presets() {
         {"d455-depth-848x480-z16-90", "realsense", "D455 深度 848x480 Z16 90 fps", 848, 480, 2, 90, "Z16 "},
         {"gemini2-depth-1280x800-y16-30", "orbbec", "Gemini 2 深度 1280x800 Y16 30 fps", 1280, 800, 2, 30, "Y16 "},
         {"gemini2-color-1280x720-yuyv-30", "orbbec", "Gemini 2 彩色 1280x720 YUYV 30 fps", 1280, 720, 2, 30, "YUYV"},
+        {"gemini305-depth-640x480-z16-30", "orbbec", "Gemini 305 深度 640x480 Z16 30 fps", 640, 480, 2, 30, "Z16 "},
+        {"gemini305-depth-1280x800-y16-30", "orbbec", "Gemini 305 深度 1280x800 Y16 30 fps", 1280, 800, 2, 30, "Y16 "},
         {"astra-color-640x480-yuyv-30", "orbbec", "Astra 彩色 640x480 YUYV 30 fps", 640, 480, 2, 30, "YUYV"},
     };
     return all;
@@ -388,9 +408,6 @@ BudgetReport budget_report(std::vector<std::string> labels, const std::vector<st
         report.plans.push_back(plan_against(speed, payloads));
     }
     if (highlight) report.highlighted = plan_against(*highlight, payloads);
-    report.notes = {"这是未压缩帧字节乘帧率，不含压缩码流、UVC 包头和总线编码。",
-                    "对照值是规范里的线路编码载荷和单路等时端点上限，不是实测。",
-                    "tight 表示已经用到上限的 80% 以上。"};
     return report;
 }
 

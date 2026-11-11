@@ -344,9 +344,6 @@ RttReport control_rtt(const DeviceFilter& filter, const RttOptions& options) {
     report.timer_overhead_ns = *summarize(overhead_samples(200));
     if (options.keep_samples) report.sample_ns = samples;
     report.errors = errors;
-    report.notes = {"每个样本是一次 GET_STATUS，区间从提交前到完成，包含一次系统调用。",
-                    "预热样本已丢弃。计时开销单独列出，不从样本扣除。",
-                    "超时和 STALL 计入 errors，不进入分位数。"};
     return report;
 }
 
@@ -468,9 +465,6 @@ BulkReport bulk_in(const DeviceFilter& filter, const BulkOptions& options) {
         report.elapsed_ns = elapsed;
         report.bytes_per_sec = static_cast<double>(bytes) / (static_cast<double>(elapsed) / 1e9);
         report.timer_overhead_ns = *summarize(overhead_samples(200));
-        report.notes = {"字节数只计已完成的传输。结束时仍在途的传输已取消，不计入。",
-                        "队列深度为 4。分母是这段传输的实测墙钟。",
-                        "这不是 UVC 视频的载荷。相机码流请用 stream。"};
         return report;
     } catch (...) {
         for (auto& slot : slots) {
