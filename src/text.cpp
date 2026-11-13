@@ -248,11 +248,23 @@ std::string text_storage(const StorageReport& report) {
     std::string out = "直接读  " + report.path + "\n" + fmt_bytes_per_sec(report.bytes_per_sec) + "  字节 " +
                       std::to_string(report.bytes) + "  用时 " + elapsed.str() + " s  圈数 " + std::to_string(report.wraps) + "\n";
     if (report.link.usb) {
-        const auto standard = usb_standard(report.link.speed);
-        out += std::string("标准  ") + standard.name + "  " + (standard.meets_usb3 ? "符合 USB 3.0" : "未到 USB 3.0") + "  协商 " +
-               speed_name(report.link.speed);
-        if (!report.link.product.empty()) out += "  " + report.link.product;
-        out += "\n";
+        if (report.link.speed == LinkSpeed::Unknown) {
+            out += "标准  USB 设备，协商速率未知";
+            if (!report.link.product.empty()) out += "  " + report.link.product;
+            if (!report.link.detail.empty()) out += "  " + report.link.detail;
+            out += "\n";
+        } else {
+            const double mbit = report.bytes_per_sec * 8.0 / 1e6;
+            const auto standard = standard_from_measured_mbit(mbit);
+            std::ostringstream measured;
+            measured.setf(std::ios::fixed);
+            measured.precision(mbit >= 100.0 ? 1 : 2);
+            measured << mbit;
+            out += std::string("标准  ") + standard.name + "  " + (standard.meets_usb3 ? "符合 USB 3.0" : "未到 USB 3.0") +
+                   "  实测 " + measured.str() + " Mbit/s  协商 " + speed_name(report.link.speed);
+            if (!report.link.product.empty()) out += "  " + report.link.product;
+            out += "\n";
+        }
     } else if (!report.link.detail.empty()) {
         out += "标准  " + report.link.detail + "\n";
     }

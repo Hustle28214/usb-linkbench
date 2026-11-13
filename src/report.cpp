@@ -1,5 +1,7 @@
 #include "linkbench.hpp"
 
+#include "os.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -566,7 +568,11 @@ std::vector<PowerRail> read_hwmon() {
 std::string local_stamp() {
     std::time_t now = std::time(nullptr);
     std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &now);
+#else
     localtime_r(&now, &tm);
+#endif
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                   tm.tm_hour, tm.tm_min, tm.tm_sec);
@@ -753,18 +759,42 @@ std::string format_port_report(const BenchReport& report) {
 }
 
 std::string test_item_catalog() {
-#ifndef LINKBENCH_CATALOG
-    throw Error("未设置测试项文件路径");
-#else
-    std::ifstream in(LINKBENCH_CATALOG);
-    if (!in) throw Error(std::string("打不开测试项文件 ") + LINKBENCH_CATALOG);
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    return buffer.str();
+    std::vector<fs::path> paths;
+    const auto exe = executable_path();
+    if (!exe.empty()) paths.push_back(exe.parent_path() / "benchmark-report.md");
+#ifdef LINKBENCH_CATALOG
+    paths.emplace_back(LINKBENCH_CATALOG);
 #endif
+    for (const auto& path : paths) {
+        std::ifstream in(path);
+        if (!in) continue;
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        return buffer.str();
+    }
+    throw Error("打不开测试项文件 benchmark-report.md");
 }
 
 std::string collect_port_report() {
+#if !defined(__linux__)
+    auto listed = list_devices(DeviceFilter{});
+    std::vector<RawDevice> raws;
+    for (const auto& dev : listed.devices) {
+        RawDevice raw;
+        raw.port.location = dev.sysfs_path.value_or(dev.bus_id.empty() ? "usb" : dev.bus_id);
+        raw.port.speed_mbps = dev.line_mbit.value_or(0);
+        raw.port.version = dev.usb_bcd;
+        raw.port.vendor_id = dev.vendor_id;
+        raw.port.product_id = dev.product_id;
+        raw.port.manufacturer = dev.manufacturer;
+        raw.port.product = dev.product;
+        raws.push_back(std::move(raw));
+    }
+    auto report = assemble(std::move(raws), {}, {}, local_stamp(), host_name(), kernel_name());
+    report.notes.push_back("这个系统没有 Linux sysfs。上下行口分类、CAN 和供电轨不采集。");
+    report.notes.insert(report.notes.end(), listed.notes.begin(), listed.notes.end());
+    return format_port_report(report);
+#else
     auto devices = read_devices();
     attach_class(devices, "/sys/class/hidraw", true);
     attach_class(devices, "/sys/class/tty", false);
@@ -775,6 +805,7 @@ std::string collect_port_report() {
     auto report = assemble(std::move(devices), read_can(), std::move(rails), local_stamp(), read_trim("/proc/sys/kernel/hostname"),
                            read_trim("/proc/sys/kernel/osrelease"));
     return format_port_report(report);
+#endif
 }
 
 }  // namespace linkbench

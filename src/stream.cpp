@@ -1,5 +1,6 @@
 #include "linkbench.hpp"
 
+#if defined(__linux__)
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -7,6 +8,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
+#endif
 
 #include <chrono>
 #include <condition_variable>
@@ -17,6 +19,7 @@
 #include <thread>
 
 namespace linkbench {
+#if defined(__linux__)
 namespace {
 
 struct Gate {
@@ -144,7 +147,7 @@ class Capture {
     bool dequeue(v4l2_buffer& buf, bool warmup) {
         pollfd pfd{};
         pfd.fd = fd_;
-        pfd.events = POLLIN;
+        pfd.events = POLLIN;// 值是 0x001
         const int rc = poll(&pfd, 1, 1000);
         if (rc == 0) {
             if (warmup) throw Error("预热取帧失败: 超时");
@@ -424,6 +427,7 @@ FrameStream capture_one(const CaptureRequest& request, const std::string& path, 
 }
 
 }  // namespace
+#endif
 
 bool verdict_failed(const StreamReport& report) {
     for (const auto& stream : report.streams) {
@@ -433,6 +437,7 @@ bool verdict_failed(const StreamReport& report) {
     return false;
 }
 
+#if defined(__linux__)
 bool is_v4l2_capture_node(const std::string& path) {
     const int fd = ::open(path.c_str(), O_RDWR | O_NONBLOCK);
     if (fd < 0) return false;
@@ -508,6 +513,7 @@ StreamReport capture(const CaptureRequest& request) {
     report.notes.insert(report.notes.end(), request.notes.begin(), request.notes.end());
     return report;
 }
+#endif
 
 namespace {
 
@@ -660,12 +666,26 @@ StreamBenchReport benchmark_stream(const CaptureRequest& request, const StreamBe
     report.score = score_stream_passes(plan, samples);
     report.notes.push_back(plan.title + "：每次 " + number_text(plan.seconds) + " s，共 " + std::to_string(plan.passes) +
                            " 次，" + (plan.keep_maximum ? "取最高" : "取最低") + "。预热帧不计入。");
+#if defined(__linux__)
     report.notes.push_back("队列深度 " + std::to_string(plan.buffers) +
                            "。这是 V4L2 mmap 缓冲个数，对应 CrystalDiskMark 的队列深度。");
+#elif defined(_WIN32)
+    report.notes.push_back("队列深度 " + std::to_string(plan.buffers) +
+                           "。Windows 的 Media Foundation 不用这个队列长度，数字只用来和 Linux 的测速档对齐。");
+#elif defined(__APPLE__)
+    report.notes.push_back("队列深度 " + std::to_string(plan.buffers) +
+                           "。macOS 的 AVFoundation 不用这个队列长度，数字只用来和 Linux 的测速档对齐。");
+#else
+    report.notes.push_back("队列深度 " + std::to_string(plan.buffers) + "。");
+#endif
     report.notes.push_back(plan.keep_maximum ? "快速性能按 CrystalDiskMark 记分：同一项重复测量，保留最高载荷速率。"
                                              : "压力测试保留最低载荷速率。丢帧比例按 丢帧 / (交出帧 + 丢帧) 计算，超过 " +
                                                    percent_text(plan.max_drop_ratio) + " 为未过。停滞、错误帧、空帧直接未过。");
+#if defined(__linux__)
     report.notes.push_back("得分是驱动交出的 bytesused 除以实测墙钟，不是链路标称速率。");
+#else
+    report.notes.push_back("得分是样本字节数除以实测墙钟，不是链路标称速率。");
+#endif
     if (!request.notes.empty()) {
         bool depth = false;
         for (const auto& node : request.node_formats) depth = depth || node.role == "depth";
@@ -711,18 +731,19 @@ std::uint32_t fps_distance(std::uint32_t fps, std::uint32_t want) {
 
 }  // namespace
 
-VideoMode pick_depth_mode(const std::vector<VideoMode>& modes) {
+VideoMode pick_depth_mode(const std::vector<VideoMode>& modes, std::uint32_t fps) {
     const VideoMode* best = nullptr;
     std::uint64_t payload = 0;
     for (const auto& mode : modes) {
         if (kind_of_fourcc(mode.fourcc) != StreamKind::Depth || mode.bytes_per_pixel < 2 || mode.fps == 0) continue;
+        if (fps != 0 && mode.fps != fps) continue;
         const auto rate = mode.payload_bytes_per_sec();
         if (!best || rate > payload) {
             best = &mode;
             payload = rate;
         }
     }
-    if (!best) throw Error("没有未压缩深度模式");
+    if (!best) throw Error(fps == 0 ? "没有未压缩深度模式" : "没有 " + std::to_string(fps) + " fps 的未压缩深度模式");
     return *best;
 }
 
@@ -768,6 +789,7 @@ VideoMode pick_color_mode(const std::vector<VideoMode>& modes, std::uint32_t dep
     return *best;
 }
 
+#if defined(__linux__)
 std::vector<NodeModes> describe_capture_nodes(const std::vector<std::string>& paths) {
     std::vector<NodeModes> nodes;
     for (const auto& path : paths) {
@@ -787,6 +809,7 @@ std::vector<NodeModes> describe_capture_nodes(const std::vector<std::string>& pa
     }
     return nodes;
 }
+#endif
 
 namespace {
 
@@ -812,14 +835,14 @@ std::string mode_text(const std::string& node, const VideoMode& mode) {
 
 }  // namespace
 
-ColorDepthPlan plan_color_depth(const std::vector<NodeModes>& nodes) {
+ColorDepthPlan plan_color_depth(const std::vector<NodeModes>& nodes, std::uint32_t fps) {
     const NodeModes* depth_node = nullptr;
     VideoMode depth_mode;
     std::uint64_t best_payload = 0;
     for (const auto& node : nodes) {
         if (node.kind != StreamKind::Depth || !node.error.empty()) continue;
         try {
-            const auto mode = pick_depth_mode(node.modes);
+            const auto mode = pick_depth_mode(node.modes, fps);
             const auto payload = mode.payload_bytes_per_sec();
             if (!depth_node || payload > best_payload) {
                 depth_node = &node;
@@ -830,7 +853,8 @@ ColorDepthPlan plan_color_depth(const std::vector<NodeModes>& nodes) {
         }
     }
     if (!depth_node) {
-        std::string message = "没有可用的深度节点（需要 Z16 或 Y16）";
+        std::string message = fps == 0 ? "没有可用的深度节点（需要 Z16 或 Y16）"
+                                       : "没有 " + std::to_string(fps) + " fps 的未压缩深度模式";
         for (const auto& node : nodes) {
             if (node.error.empty()) continue;
             message += "；" + node.path + ": " + node.error;
@@ -868,7 +892,11 @@ ColorDepthPlan plan_color_depth(const std::vector<NodeModes>& nodes) {
     plan.request.notes.push_back("彩色 " + mode_text(color_node->path, color_mode) + " 与深度 " +
                                  mode_text(depth_node->path, depth_mode) + " 同时开流。");
     plan.request.notes.push_back("深度预算 " + fmt_bytes_per_sec_u(best_payload) +
+#if defined(__linux__)
                                  "。这是未压缩帧字节乘请求帧率，实测看深度那一路的 bytesused。");
+#else
+                                 "。这是未压缩帧字节乘请求帧率，实测看深度那一路的样本字节。");
+#endif
     if (best_payload < 12'500'000) plan.request.notes.push_back("深度预算不到 100 Mbit/s。");
     if (const auto hs = default_one_isoc_endpoint_bytes_per_sec(LinkSpeed::High)) {
         if (best_payload > *hs) {

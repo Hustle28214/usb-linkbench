@@ -2,6 +2,7 @@
 
 #include <QMainWindow>
 #include <QVariantMap>
+#include <QVector>
 
 class QComboBox;
 class QDoubleSpinBox;
@@ -14,6 +15,7 @@ class QThread;
 class QVBoxLayout;
 class QWidget;
 class MeasureWorker;
+class Sparkline;
 class SpeedGauge;
 
 class MainWindow : public QMainWindow {
@@ -50,6 +52,13 @@ private:
     void startStream(const QString& profile);
     void clearLinkBars();
     void inspectStoragePath();
+    void noteStoragePath();
+    void syncNodeCaption();
+    void clearCameraStandard();
+    void showCameraStandard(double mbit_per_sec);
+    void refreshNegotiatedSpeed();
+    void clearStreamHistory();
+    void showStream(double mib_per_sec, double mbit_per_sec, double fps, const QString& tip);
     QStringList captureNodes() const;
 
     QThread* worker_thread_ = nullptr;
@@ -58,7 +67,6 @@ private:
     QLabel* status_ = nullptr;
     QComboBox* device_box_ = nullptr;
     QComboBox* node_box_ = nullptr;
-    QLabel* device_meta_ = nullptr;
     QWidget* links_bars_ = nullptr;
     QVBoxLayout* links_bars_layout_ = nullptr;
     QLineEdit* storage_path_ = nullptr;
@@ -66,8 +74,22 @@ private:
     QSpinBox* rtt_count_box_ = nullptr;
 
     SpeedGauge* stream_gauge_ = nullptr;
-    SpeedGauge* rtt_gauge_ = nullptr;
-    SpeedGauge* storage_gauge_ = nullptr;
+    Sparkline* stream_spark_ = nullptr;
+    Sparkline* storage_spark_ = nullptr;
+    QLabel* latency_p50_ = nullptr;
+    QLabel* latency_p95_ = nullptr;
+    QLabel* latency_max_ = nullptr;
+    QLabel* jitter_value_ = nullptr;
+    QLabel* error_value_ = nullptr;
+    QLabel* footer_device_title_ = nullptr;
+    QLabel* footer_device_sub_ = nullptr;
+    QLabel* footer_node_title_ = nullptr;
+    QLabel* footer_node_sub_ = nullptr;
+
+    QFrame* stream_std_box_ = nullptr;
+    QLabel* stream_std_title_ = nullptr;
+    QLabel* stream_std_badge_ = nullptr;
+    QLabel* stream_std_detail_ = nullptr;
     QFrame* storage_std_box_ = nullptr;
     QLabel* storage_std_title_ = nullptr;
     QLabel* storage_std_badge_ = nullptr;
@@ -81,6 +103,15 @@ private:
     QPushButton* rtt_btn_ = nullptr;
     QPushButton* storage_btn_ = nullptr;
     QPushButton* browse_btn_ = nullptr;
+
+    QVector<double> stream_samples_;
+    QVector<double> storage_samples_;
+    QString storage_path_key_;
+    bool storage_link_known_ = false;
+    bool storage_link_usb_ = false;
+    int storage_link_speed_ = 0;
+    QString storage_link_product_;
+    QString storage_link_detail_;
 
     int busy_count_ = 0;
     bool depth_gauge_ = false;

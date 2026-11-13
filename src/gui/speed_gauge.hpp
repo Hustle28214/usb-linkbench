@@ -32,7 +32,7 @@ private:
     double target_value_ = 0;
     QString unit_;
     QString caption_;
-    QColor accent_{0x1f, 0xa2, 0xa6};
+    QColor accent_{0x2e, 0xe6, 0xc7};
     bool busy_ = false;
     class QTimer* timer_ = nullptr;
 };

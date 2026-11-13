@@ -19,6 +19,7 @@ QVariantMap deviceMap(const linkbench::DeviceRecord& device) {
     map.insert(QStringLiteral("bus_id"), QString::fromStdString(device.bus_id));
     map.insert(QStringLiteral("address"), static_cast<int>(device.address));
     map.insert(QStringLiteral("speed"), QString::fromUtf8(linkbench::speed_name(device.speed)));
+    map.insert(QStringLiteral("speed_code"), static_cast<int>(device.speed));
     map.insert(QStringLiteral("product"), QString::fromStdString(device.product.value_or(device.catalog_name.value_or(""))));
     map.insert(QStringLiteral("family"), QString::fromStdString(device.family.value_or("-")));
     QStringList nodes;
@@ -73,11 +74,11 @@ void MeasureWorker::refreshLinks() {
         };
 
         auto speedColor = [](double gts) -> QString {
-            if (gts >= 16.0) return QStringLiteral("#0D9488");
-            if (gts >= 8.0) return QStringLiteral("#2563EB");
-            if (gts >= 5.0) return QStringLiteral("#0891B2");
-            if (gts >= 2.5) return QStringLiteral("#D97706");
-            return QStringLiteral("#94A3B8");
+            if (gts >= 16.0) return QStringLiteral("#2EE6C7");
+            if (gts >= 8.0) return QStringLiteral("#5BB8FF");
+            if (gts >= 5.0) return QStringLiteral("#3DDCFF");
+            if (gts >= 2.5) return QStringLiteral("#F0B429");
+            return QStringLiteral("#6E8098");
         };
 
         auto parseGts = [](const std::string& text) -> double {
@@ -96,11 +97,11 @@ void MeasureWorker::refreshLinks() {
             const double ceiling = std::max({tx, rx, 40.0});
             if (port.tx_speed_gbps) {
                 addBar(name + QStringLiteral(" TX"), QStringLiteral("Thunderbolt"),
-                       QString("%1 Gbit/s").arg(tx, 0, 'f', 1), tx, ceiling, QStringLiteral("#2563EB"));
+                       QString("%1 Gbit/s").arg(tx, 0, 'f', 1), tx, ceiling, QStringLiteral("#5BB8FF"));
             }
             if (port.rx_speed_gbps) {
                 addBar(name + QStringLiteral(" RX"), QStringLiteral("Thunderbolt"),
-                       QString("%1 Gbit/s").arg(rx, 0, 'f', 1), rx, ceiling, QStringLiteral("#0D9488"));
+                       QString("%1 Gbit/s").arg(rx, 0, 'f', 1), rx, ceiling, QStringLiteral("#2EE6C7"));
             }
         }
 
@@ -109,7 +110,7 @@ void MeasureWorker::refreshLinks() {
             const double full = total - static_cast<double>(report.pcie_degraded.size());
             addBar(QStringLiteral("满速"), QStringLiteral("PCIe"),
                    QString("%1/%2").arg(static_cast<int>(full)).arg(static_cast<int>(total)), full, total,
-                   full >= total ? QStringLiteral("#0D9488") : QStringLiteral("#D97706"));
+                   full >= total ? QStringLiteral("#2EE6C7") : QStringLiteral("#F0B429"));
 
             std::vector<std::pair<double, std::pair<std::string, std::size_t>>> ranked;
             ranked.reserve(report.pcie_speed_counts.size());

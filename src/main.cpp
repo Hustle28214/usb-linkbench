@@ -214,8 +214,8 @@ int main(int argc, char** argv) {
                 throw linkbench::Error("设置格式时 width、height、fourcc 要一起给");
             }
             if (color_depth) {
-                if (request.width || request.height || request.fourcc || request.fps || !presets.empty()) {
-                    throw linkbench::Error("--color-depth 会分别为彩色和深度设置格式，不要同时给 --width、--height、--fourcc、--fps 或 --preset");
+                if (request.width || request.height || request.fourcc || !presets.empty()) {
+                    throw linkbench::Error("--color-depth 会分别为彩色和深度设置格式，不要同时给 --width、--height、--fourcc 或 --preset");
                 }
                 if (!explicit_nodes) {
                     auto listed = linkbench::list_devices(filter_from(cli));
@@ -231,7 +231,7 @@ int main(int argc, char** argv) {
                 } else {
                     filter_from(cli);
                 }
-                auto planned = linkbench::plan_color_depth(linkbench::describe_capture_nodes(devices));
+                auto planned = linkbench::plan_color_depth(linkbench::describe_capture_nodes(devices), request.fps.value_or(0));
                 planned.request.seconds = request.seconds;
                 planned.request.warmup_frames = request.warmup_frames;
                 planned.request.buffers = request.buffers;

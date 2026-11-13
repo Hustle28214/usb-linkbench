@@ -44,6 +44,12 @@ std::optional<std::uint32_t> read_u32(const fs::path& path) {
 
 LinksReport links(bool verbose) {
     LinksReport report;
+#if !defined(__linux__)
+    (void)verbose;
+    report.thunderbolt_skip_reason = "只在 Linux 上读 /sys/bus/thunderbolt";
+    report.notes.push_back("PCIe 已训练速率只在 Linux 上读 /sys/bus/pci。");
+    return report;
+#endif
     const fs::path thunderbolt_root = "/sys/bus/thunderbolt/devices";
     std::error_code ec;
     if (!fs::exists(thunderbolt_root, ec)) {

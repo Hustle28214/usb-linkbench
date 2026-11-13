@@ -59,6 +59,10 @@ struct UsbStandard {
 };
 
 UsbStandard usb_standard(LinkSpeed speed);
+// 用这次测到的 Mbit/s 判断。高于 USB 2.0 线速 480 Mbit/s 即符合 USB 3.0。10/20 Gbit/s 再标更高世代。
+UsbStandard standard_from_measured_mbit(double mbit_per_sec);
+std::optional<LinkSpeed> live_link_speed(std::uint16_t vendor, std::uint16_t product, const std::string& bus_id,
+                                        std::uint8_t address);
 
 enum class TransferKind { Control, Isochronous, Bulk, Interrupt };
 const char* transfer_name(TransferKind kind);
@@ -354,11 +358,11 @@ StreamReport capture(const CaptureRequest& request);
 bool verdict_failed(const StreamReport& report);
 StreamKind kind_of_fourcc(const std::string& fourcc);
 std::uint32_t bytes_per_pixel_of(const std::string& fourcc);
-VideoMode pick_depth_mode(const std::vector<VideoMode>& modes);
+VideoMode pick_depth_mode(const std::vector<VideoMode>& modes, std::uint32_t fps = 0);
 VideoMode pick_color_mode(const std::vector<VideoMode>& modes, std::uint32_t depth_fps, std::uint32_t depth_width = 0,
                            std::uint32_t depth_height = 0);
 std::vector<NodeModes> describe_capture_nodes(const std::vector<std::string>& paths);
-ColorDepthPlan plan_color_depth(const std::vector<NodeModes>& nodes);
+ColorDepthPlan plan_color_depth(const std::vector<NodeModes>& nodes, std::uint32_t fps = 0);
 
 struct StreamPassSample {
     double bytes_per_sec = 0;// 吞吐（字节/秒）

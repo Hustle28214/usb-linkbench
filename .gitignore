@@ -7,3 +7,7 @@
 /results
 /drafts
 /.cursor
+/.toolchain
+/dist
+/build-win
+/third_party

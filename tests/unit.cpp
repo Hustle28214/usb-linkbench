@@ -65,6 +65,20 @@ int main() {
     CHECK(std::string(linkbench::usb_standard(linkbench::LinkSpeed::SuperPlus10).name) == "USB 3.1");
     CHECK(std::string(linkbench::usb_standard(linkbench::LinkSpeed::High).name) == "USB 2.0");
     CHECK(!linkbench::usb_standard(linkbench::LinkSpeed::High).meets_usb3);
+    CHECK(std::string(linkbench::standard_from_measured_mbit(151.5).name) == "USB 2.0");
+    CHECK(!linkbench::standard_from_measured_mbit(151.5).meets_usb3);
+    CHECK(std::string(linkbench::standard_from_measured_mbit(480.0).name) == "USB 2.0");
+    CHECK(!linkbench::standard_from_measured_mbit(480.0).meets_usb3);
+    CHECK(std::string(linkbench::standard_from_measured_mbit(481.0).name) == "USB 3.0");
+    CHECK(linkbench::standard_from_measured_mbit(481.0).meets_usb3);
+    CHECK(std::string(linkbench::standard_from_measured_mbit(585.3).name) == "USB 3.0");
+    CHECK(linkbench::standard_from_measured_mbit(585.3).meets_usb3);
+    CHECK(linkbench::standard_from_measured_mbit(5000.0).meets_usb3);
+    CHECK(std::string(linkbench::standard_from_measured_mbit(5000.0).name) == "USB 3.0");
+    CHECK(std::string(linkbench::standard_from_measured_mbit(10000.0).name) == "USB 3.1");
+    CHECK(linkbench::standard_from_measured_mbit(10000.0).meets_usb3);
+    CHECK(std::string(linkbench::standard_from_measured_mbit(20000.0).name) == "USB 3.2");
+    CHECK(!linkbench::standard_from_measured_mbit(0.0).meets_usb3);
     const char* mounts =
         "22 1 8:1 / /media/disk rw,relatime - vfat /dev/sdb1 rw\n"
         "23 1 259:2 / /media/disk/sub rw - ext4 /dev/nvme0n1p2 rw\n"
@@ -286,6 +300,8 @@ int main() {
     CHECK(wide_depth.payload_bytes_per_sec() == 1280ull * 800 * 2 * 30);
     const auto deepest = linkbench::pick_depth_mode({vga_depth, fast_depth, wide_depth});
     CHECK(deepest.width == 1280 && deepest.height == 800 && deepest.fourcc == "Y16" && deepest.fps == 30);
+    const auto at_60 = linkbench::pick_depth_mode({vga_depth, fast_depth, wide_depth}, 60);
+    CHECK(at_60.width == 640 && at_60.fps == 60);
 
     linkbench::VideoMode mjpg_hd{1920, 1080, "MJPG", 30, 0};
     linkbench::VideoMode mjpg_vga{640, 480, "MJPG", 30, 0};

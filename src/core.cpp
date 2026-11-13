@@ -7,7 +7,7 @@
 #include <sstream>
 #include <thread>
 
-#if defined(__unix__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
 #include <time.h>
 #endif
 #if defined(_WIN32)
@@ -88,13 +88,7 @@ std::string fmt_us_f(double ns) {
 }
 
 std::uint64_t now_ns() {
-#if defined(__unix__)
-    timespec ts{};
-    if (clock_gettime(4, &ts) != 0) {
-        clock_gettime(CLOCK_MONOTONIC, &ts);// 类UNIX系统才奏效，WIN系统用不了，且如果改用QueryPerformanceCounter语义上有一点区别。
-    }
-    return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
-#elif defined(_WIN32)
+#if defined(_WIN32)
     static const auto freq = [] {
         LARGE_INTEGER hz;
         QueryPerformanceFrequency(&hz);
@@ -104,8 +98,21 @@ std::uint64_t now_ns() {
     QueryPerformanceCounter(&count);
     const auto ticks = static_cast<std::uint64_t>(count.QuadPart);
     return ticks / freq * 1000000000ull + (ticks % freq) * 1000000000ull / freq;
+#elif defined(__linux__)
+    timespec ts{};
+#ifndef CLOCK_MONOTONIC_RAW
+#define CLOCK_MONOTONIC_RAW 4
+#endif
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
+#elif defined(__APPLE__) || defined(__unix__)
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
 #else
-    return 0;
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count());
 #endif
 }
 
@@ -231,6 +238,17 @@ LinkSpeed speed_from_mbps(double mbps) {
     return LinkSpeed::Unknown;
 }
 
+UsbStandard standard_from_measured_mbit(double mbit_per_sec) {
+    if (!(mbit_per_sec > 0.0)) return {"未知", false};
+    if (mbit_per_sec >= 20000.0) return {"USB 3.2", true};
+    if (mbit_per_sec >= 10000.0) return {"USB 3.1", true};
+    if (mbit_per_sec >= 5000.0) return {"USB 3.0", true};
+    if (mbit_per_sec > 480.0) return {"USB 3.0", true};
+    if (mbit_per_sec >= 12.0) return {"USB 2.0", false};
+    if (mbit_per_sec >= 1.5) return {"USB 1.1", false};
+    return {"低速", false};
+}
+
 UsbStandard usb_standard(LinkSpeed speed) {
     switch (speed) {
         case LinkSpeed::Super:
@@ -302,6 +320,12 @@ Fit fit_payload(std::uint64_t payload, std::optional<std::uint64_t> ceiling) {
 }
 
 std::optional<std::uint64_t> periodic_ceiling_bytes_per_sec(const PeriodicEndpoint& endpoint) {
+    // periodic_ceiling_bytes_per_sec 用端点描述符算出周期端点（中断、等时）每秒最多能排多少字节。
+    // 每秒上限 = 每次服务能搬的字节 × 每秒服务次数
+    // 超速（Super / 10 Gbit/s / 20 Gbit/s）：优先用伴随描述符里的 bytes_per_interval（wBytesPerInterval）。没有的话用 max_packet × burst × mult。burst 缺省按 1；mult 只对等时有效，中断固定为 1。
+    // 低速只允许中断，低速等时也返回空。
+    // 高速及以上若 bInterval 减 1 后左移位数 ≥ 16（合法范围是 1–16），同样返回空。
+    // 高速等时：max_packet × packets_per_microframe。packets_per_microframe 来自 wMaxPacketSize 的 bit 12:11，取值 1、2 或 3。
     if (endpoint.max_packet == 0 || endpoint.interval == 0 || endpoint.kind == TransferKind::Bulk ||
         endpoint.kind == TransferKind::Control) {
         return std::nullopt;
