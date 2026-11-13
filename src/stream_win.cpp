@@ -20,18 +20,29 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <iterator>
+#include <map>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace linkbench {
 namespace {
+
+constexpr const char kStreamMarker[] = "::mfstream=";
 
 struct VideoDevice {
     std::string link;
     std::string name;
     std::uint16_t vendor = 0;
     std::uint16_t product = 0;
+};
+
+struct NodeRef {
+    std::string link;
+    std::optional<DWORD> stream;
 };
 
 struct ComApartment {
@@ -93,6 +104,27 @@ bool parse_vid_pid(const std::string& text, std::uint16_t* vendor, std::uint16_t
     }
 }
 
+NodeRef parse_node(const std::string& path) {
+    NodeRef ref;
+    const auto at = path.rfind(kStreamMarker);
+    if (at == std::string::npos) {
+        ref.link = path;
+        return ref;
+    }
+    ref.link = path.substr(0, at);
+    try {
+        ref.stream = static_cast<DWORD>(std::stoul(path.substr(at + sizeof(kStreamMarker) - 1)));
+    } catch (...) {
+        ref.link = path;
+        ref.stream.reset();
+    }
+    return ref;
+}
+
+std::string make_node(const std::string& link, DWORD stream) {
+    return link + kStreamMarker + std::to_string(stream);
+}
+
 std::string allocated_string(IMFActivate* activate, const GUID& key) {
     wchar_t* text = nullptr;
     UINT32 chars = 0;
@@ -128,12 +160,14 @@ std::vector<VideoDevice> enumerate_sources() {
 }
 
 std::vector<VideoDevice> match_sources(const std::string& path) {
+    const auto ref = parse_node(path);
     const auto all = enumerate_sources();
     std::vector<VideoDevice> exact;
     std::vector<VideoDevice> partial;
     for (const auto& device : all) {
-        if (device.link == path || device.name == path) exact.push_back(device);
-        else if (device.link.find(path) != std::string::npos || (!device.name.empty() && device.name.find(path) != std::string::npos)) {
+        if (device.link == ref.link || device.name == ref.link) exact.push_back(device);
+        else if (device.link.find(ref.link) != std::string::npos ||
+                 (!device.name.empty() && device.name.find(ref.link) != std::string::npos)) {
             partial.push_back(device);
         }
     }
@@ -162,31 +196,100 @@ struct Reader {
     Reader() = default;
 };
 
-Reader open_reader(const std::string& path) {
-    auto matches = match_sources(path);
-    if (matches.empty()) throw Error("没有这个视频设备: " + path);
+Reader open_reader(const std::string& link_or_path) {
+    const auto ref = parse_node(link_or_path);
+    auto matches = match_sources(ref.link);
+    if (matches.empty()) throw Error("没有这个视频设备: " + ref.link);
     if (matches.size() != 1) throw Error("视频节点匹配到 " + std::to_string(matches.size()) + " 个设备，请用 list 打出的完整链接");
     ComApartment apartment;
     ensure_media();
+    // 不要用 SYMBOLIC_LINK 过滤 MFEnumDeviceSources：那样常会落到 Frame Server，
+    // RealSense 只剩一路 NV12，Z16/多流原生类型消失。改为全量枚举再按链接匹配。
     IMFAttributes* attrs = nullptr;
-    if (FAILED(MFCreateAttributes(&attrs, 2)) || !attrs) throw Error("创建 Media Foundation 属性失败");
+    if (FAILED(MFCreateAttributes(&attrs, 1)) || !attrs) throw Error("创建 Media Foundation 属性失败");
     attrs->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
-    const auto wide = utf8_to_wide(matches.front().link);
-    attrs->SetString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, wide.c_str());
     IMFActivate** devices = nullptr;
     UINT32 count = 0;
     HRESULT hr = MFEnumDeviceSources(attrs, &devices, &count);
     attrs->Release();
-    if (FAILED(hr) || count == 0 || !devices) throw Error("打开视频设备失败: " + path);
+    if (FAILED(hr) || count == 0 || !devices) throw Error("打开视频设备失败: " + ref.link);
+
+    IMFActivate* chosen = nullptr;
+    for (UINT32 i = 0; i < count; ++i) {
+        const auto link = allocated_string(devices[i], MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK);
+        if (link == matches.front().link) {
+            chosen = devices[i];
+            break;
+        }
+    }
+    if (!chosen) {
+        for (UINT32 i = 0; i < count; ++i) devices[i]->Release();
+        CoTaskMemFree(devices);
+        throw Error("打开视频设备失败: " + ref.link);
+    }
+
     Reader reader;
     reader.name = matches.front().name.empty() ? matches.front().link : matches.front().name;
-    hr = devices[0]->ActivateObject(IID_IMFMediaSource, reinterpret_cast<void**>(&reader.source));
+    hr = chosen->ActivateObject(IID_IMFMediaSource, reinterpret_cast<void**>(&reader.source));
     for (UINT32 i = 0; i < count; ++i) devices[i]->Release();
     CoTaskMemFree(devices);
     if (FAILED(hr) || !reader.source) throw Error("激活视频设备失败: " + hr_text(hr));
-    hr = MFCreateSourceReaderFromMediaSource(reader.source, nullptr, &reader.reader);
+
+    IMFAttributes* reader_attrs = nullptr;
+    if (FAILED(MFCreateAttributes(&reader_attrs, 2)) || !reader_attrs) throw Error("创建读取器属性失败");
+    reader_attrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE);
+    reader_attrs->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
+    hr = MFCreateSourceReaderFromMediaSource(reader.source, reader_attrs, &reader.reader);
+    reader_attrs->Release();
     if (FAILED(hr) || !reader.reader) throw Error("创建视频读取器失败: " + hr_text(hr));
     return reader;
+}
+
+std::vector<DWORD> list_video_streams(IMFMediaSource* source, IMFSourceReader* reader) {
+    std::vector<DWORD> out;
+    // RealSense 等设备默认只选中第一路；未选中时 GetNativeMediaType 可能直接失败，必须先全选。
+    reader->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), TRUE);
+    for (DWORD index = 0; index < 32; ++index) {
+        IMFMediaType* type = nullptr;
+        const HRESULT hr = reader->GetNativeMediaType(index, 0, &type);
+        if (hr == MF_E_INVALIDSTREAMNUMBER) break;
+        if (hr == MF_E_NO_MORE_TYPES) continue;
+        if (FAILED(hr)) continue;
+        GUID major{};
+        const bool video = SUCCEEDED(type->GetGUID(MF_MT_MAJOR_TYPE, &major)) && major == MFMediaType_Video;
+        type->Release();
+        if (video) out.push_back(index);
+    }
+    if (!out.empty()) return out;
+    if (!source) return out;
+    IMFPresentationDescriptor* pd = nullptr;
+    if (FAILED(source->CreatePresentationDescriptor(&pd)) || !pd) return out;
+    DWORD count = 0;
+    pd->GetStreamDescriptorCount(&count);
+    for (DWORD index = 0; index < count; ++index) {
+        BOOL selected = FALSE;
+        IMFStreamDescriptor* sd = nullptr;
+        if (FAILED(pd->GetStreamDescriptorByIndex(index, &selected, &sd)) || !sd) continue;
+        IMFMediaTypeHandler* handler = nullptr;
+        GUID major{};
+        if (SUCCEEDED(sd->GetMediaTypeHandler(&handler)) && handler) {
+            if (SUCCEEDED(handler->GetMajorType(&major)) && major == MFMediaType_Video) out.push_back(index);
+            handler->Release();
+        }
+        sd->Release();
+    }
+    pd->Release();
+    return out;
+}
+
+DWORD resolve_stream_index(IMFMediaSource* source, IMFSourceReader* reader, const NodeRef& ref) {
+    const auto streams = list_video_streams(source, reader);
+    if (streams.empty()) throw Error("设备没有视频流");
+    if (!ref.stream) return streams.front();
+    for (const auto index : streams) {
+        if (index == *ref.stream) return index;
+    }
+    throw Error("没有视频流 " + std::to_string(*ref.stream));
 }
 
 struct TypeInfo {
@@ -217,13 +320,13 @@ TypeInfo read_type(IMFMediaType* type) {
     return info;
 }
 
-void apply_format(IMFSourceReader* reader, const detail::ResolvedFormat& resolved) {
+void apply_format(IMFSourceReader* reader, DWORD stream, const detail::ResolvedFormat& resolved) {
     if (!resolved.width && !resolved.height && !resolved.fourcc && !resolved.fps) return;
     const auto want = canon_fourcc(resolved.fourcc.value_or(""));
     IMFMediaType* chosen = nullptr;
     for (DWORD index = 0;; ++index) {
         IMFMediaType* type = nullptr;
-        const HRESULT hr = reader->GetNativeMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), index, &type);
+        const HRESULT hr = reader->GetNativeMediaType(stream, index, &type);
         if (hr == MF_E_NO_MORE_TYPES) break;
         if (FAILED(hr) || !type) break;
         const auto info = read_type(type);
@@ -253,7 +356,7 @@ void apply_format(IMFSourceReader* reader, const detail::ResolvedFormat& resolve
     chosen->CopyAllItems(copy);
     chosen->Release();
     if (resolved.fps) MFSetAttributeRatio(copy, MF_MT_FRAME_RATE, *resolved.fps, 1);
-    const HRESULT hr = reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, copy);
+    const HRESULT hr = reader->SetCurrentMediaType(stream, nullptr, copy);
     copy->Release();
     if (FAILED(hr)) throw Error(std::string("设置格式失败: ") + hr_text(hr));
 }
@@ -265,155 +368,245 @@ struct Sample {
     bool empty = false;
 };
 
-bool read_one(IMFSourceReader* reader, Sample* sample, bool warmup) {
-    const auto started = now_ns();
-    DWORD flags = 0;
-    LONGLONG timestamp = 0;
-    IMFSample* raw = nullptr;
-    const HRESULT hr = reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, &flags, &timestamp, &raw);
-    if (now_ns() - started > 2'000'000'000ull) {
-        if (raw) raw->Release();
-        if (warmup) throw Error("预热取帧超时");
-        return false;
+struct StreamSlot {
+    std::string path;
+    DWORD index = 0;
+    detail::ResolvedFormat resolved;
+    TypeInfo format;
+    std::uint64_t frames = 0;
+    std::uint64_t error_frames = 0;
+    std::uint64_t empty_frames = 0;
+    std::uint64_t dropped = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t warmup_left = 0;
+    std::optional<std::int64_t> last_ts;
+    std::optional<std::int64_t> first_ts;
+    std::uint64_t timestamped = 0;
+    bool stalled = false;
+};
+
+void select_only(IMFSourceReader* reader, const std::vector<DWORD>& indices) {
+    reader->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), FALSE);
+    for (const auto index : indices) {
+        const HRESULT hr = reader->SetStreamSelection(index, TRUE);
+        if (FAILED(hr)) throw Error("选择视频流失败: " + hr_text(hr));
     }
-    if (FAILED(hr)) {
-        if (raw) raw->Release();
-        if (warmup) throw Error(std::string("预热取帧失败: ") + hr_text(hr));
-        sample->error = true;
-        return true;
-    }
-    if (flags & MF_SOURCE_READERF_ERROR) sample->error = true;
-    if (flags & MF_SOURCE_READERF_STREAMTICK) {
-        if (raw) raw->Release();
-        return true;
-    }
-    if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
-        if (raw) raw->Release();
-        if (warmup) throw Error("预热时视频流结束");
-        return false;
-    }
-    if (!raw) {
-        sample->empty = true;
-        return true;
-    }
-    sample->timestamp = timestamp;
-    IMFMediaBuffer* buffer = nullptr;
-    if (SUCCEEDED(raw->ConvertToContiguousBuffer(&buffer)) && buffer) {
-        DWORD length = 0;
-        buffer->GetCurrentLength(&length);
-        sample->bytes = length;
-        buffer->Release();
-    }
-    raw->Release();
-    if (sample->bytes == 0) sample->empty = true;
-    return true;
 }
 
-FrameStream capture_one(const CaptureRequest& request, const std::string& path, detail::Gate& configured, detail::Gate& measuring) {
+FrameStream finish_slot(const StreamSlot& slot, const CaptureRequest& request, std::uint64_t elapsed, const std::string& card) {
+    const auto elapsed_s = static_cast<double>(std::max<std::uint64_t>(elapsed, 1)) / 1e9;
+    const auto payload_frames = slot.frames - std::min(slot.frames, slot.error_frames + slot.empty_frames);
+    const double mean = payload_frames == 0 ? 0 : static_cast<double>(slot.bytes) / static_cast<double>(payload_frames);
+    FrameStream stream;
+    stream.node = slot.path;
+    stream.driver = "Media Foundation";
+    stream.card = card;
+    stream.width = slot.format.width;
+    stream.height = slot.format.height;
+    stream.fourcc = slot.format.fourcc;
+    stream.sizeimage = slot.format.sizeimage;
+    stream.buffer_count = request.buffers;
+    stream.warmup_frames = request.warmup_frames;
+    stream.frames = slot.frames;
+    stream.error_frames = slot.error_frames;
+    stream.empty_frames = slot.empty_frames;
+    stream.dropped_frames = slot.dropped;
+    stream.bytes = slot.bytes;
+    stream.elapsed_ns = elapsed;
+    stream.window_fps = static_cast<double>(slot.frames) / elapsed_s;
+    stream.window_bytes_per_sec = static_cast<double>(slot.bytes) / elapsed_s;
+    stream.mean_frame_bytes = mean;
+    stream.interval_source = slot.timestamped > 0 ? "sample_time" : "userspace_read";
+    if (slot.first_ts && slot.last_ts && slot.timestamped >= 2 && *slot.last_ts > *slot.first_ts) {
+        stream.driver_fps = static_cast<double>(slot.timestamped - 1) * 1e7 / static_cast<double>(*slot.last_ts - *slot.first_ts);
+    }
+    stream.stalled = slot.stalled;
+    stream.role = slot.resolved.role;
+    stream.verdict = detail::build_verdict(stream.window_fps, mean, slot.resolved.min_fps, slot.resolved.expect_frame_bytes);
+    return stream;
+}
+
+void account_sample(StreamSlot* slot, const Sample& sample) {
+    if (!sample.timestamp && sample.bytes == 0 && !sample.error && !sample.empty) return;
+    ++slot->frames;
+    if (sample.error) {
+        ++slot->error_frames;
+        return;
+    }
+    if (sample.empty || sample.bytes == 0) {
+        ++slot->empty_frames;
+        return;
+    }
+    const std::uint32_t fps = slot->resolved.fps.value_or(slot->format.fps);
+    if (sample.timestamp) {
+        if (slot->first_ts && slot->last_ts && fps > 0 && *sample.timestamp > *slot->last_ts) {
+            const auto expected = 10'000'000ll / static_cast<std::int64_t>(fps);
+            if (expected > 0) {
+                const auto gap = (*sample.timestamp - *slot->last_ts) / expected;
+                if (gap > 1 && gap < 1000) slot->dropped += static_cast<std::uint64_t>(gap - 1);
+            }
+        }
+        if (!slot->first_ts) slot->first_ts = sample.timestamp;
+        slot->last_ts = sample.timestamp;
+        ++slot->timestamped;
+    }
+    slot->bytes += sample.bytes;
+}
+
+std::vector<FrameStream> capture_device(const CaptureRequest& request, const std::string& link, const std::vector<std::string>& paths,
+                                        detail::Gate& configured, detail::Gate& measuring) {
     ComApartment apartment;
-    auto opened = open_reader(path);
-    const auto resolved = detail::resolve_format(request, path);
-    apply_format(opened.reader, resolved);
-    IMFMediaType* current = nullptr;
-    TypeInfo format;
-    if (SUCCEEDED(opened.reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &current)) && current) {
-        format = read_type(current);
-        current->Release();
+    auto opened = open_reader(link);
+    std::vector<StreamSlot> slots;
+    slots.reserve(paths.size());
+    for (const auto& path : paths) {
+        StreamSlot slot;
+        slot.path = path;
+        slot.index = resolve_stream_index(opened.source, opened.reader, parse_node(path));
+        slot.resolved = detail::resolve_format(request, path);
+        slot.warmup_left = request.warmup_frames;
+        slots.push_back(std::move(slot));
+    }
+
+    std::vector<DWORD> indices;
+    for (const auto& slot : slots) indices.push_back(slot.index);
+    select_only(opened.reader, indices);
+    for (auto& slot : slots) {
+        apply_format(opened.reader, slot.index, slot.resolved);
+        IMFMediaType* current = nullptr;
+        if (SUCCEEDED(opened.reader->GetCurrentMediaType(slot.index, &current)) && current) {
+            slot.format = read_type(current);
+            current->Release();
+        }
     }
     if (!configured.arrive()) throw Error("其他视频节点还没设好格式");
-    for (std::uint32_t i = 0; i < request.warmup_frames; ++i) {
-        for (;;) {
-            Sample sample;
-            if (!read_one(opened.reader, &sample, true) || sample.error) throw Error("预热取帧失败");
-            if (!sample.timestamp && sample.bytes == 0 && !sample.empty) continue;
-            break;
+
+    auto find_slot = [&](DWORD index) -> StreamSlot* {
+        for (auto& slot : slots) {
+            if (slot.index == index) return &slot;
         }
+        return nullptr;
+    };
+
+    while (true) {
+        bool need = false;
+        for (const auto& slot : slots) need = need || slot.warmup_left > 0;
+        if (!need) break;
+        DWORD actual = 0;
+        DWORD flags = 0;
+        LONGLONG timestamp = 0;
+        IMFSample* raw = nullptr;
+        const auto started = now_ns();
+        const HRESULT hr = opened.reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_ANY_STREAM), 0, &actual, &flags, &timestamp, &raw);
+        if (now_ns() - started > 2'000'000'000ull) {
+            if (raw) raw->Release();
+            throw Error("预热取帧超时");
+        }
+        if (FAILED(hr)) {
+            if (raw) raw->Release();
+            throw Error(std::string("预热取帧失败: ") + hr_text(hr));
+        }
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
+            if (raw) raw->Release();
+            throw Error("预热时视频流结束");
+        }
+        auto* slot = find_slot(actual);
+        if (!slot || (flags & MF_SOURCE_READERF_STREAMTICK) || !raw) {
+            if (raw) raw->Release();
+            continue;
+        }
+        if (slot->warmup_left > 0) --slot->warmup_left;
+        raw->Release();
     }
     if (!measuring.arrive()) throw Error("其他视频节点预热失败");
 
     const auto limit = static_cast<std::uint64_t>(request.seconds * 1e9);
     const auto started = now_ns();
-    std::uint64_t frames = 0, error_frames = 0, empty_frames = 0, dropped = 0, bytes = 0;
-    std::optional<std::int64_t> last_ts;
-    std::optional<std::int64_t> first_ts;
-    std::uint64_t timestamped = 0;
-    bool stalled = false;
-    const std::uint32_t fps = resolved.fps.value_or(format.fps);
     while (elapsed_ns(started) < limit) {
-        Sample sample;
-        if (!read_one(opened.reader, &sample, false)) {
-            stalled = true;
+        DWORD actual = 0;
+        DWORD flags = 0;
+        LONGLONG timestamp = 0;
+        IMFSample* raw = nullptr;
+        const auto read_started = now_ns();
+        const HRESULT hr =
+            opened.reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_ANY_STREAM), 0, &actual, &flags, &timestamp, &raw);
+        if (now_ns() - read_started > 2'000'000'000ull) {
+            if (raw) raw->Release();
+            for (auto& slot : slots) slot.stalled = true;
             break;
         }
-        if (!sample.timestamp && sample.bytes == 0 && !sample.error && !sample.empty) continue;
-        ++frames;
-        if (sample.error) {
-            ++error_frames;
-            continue;
-        }
-        if (sample.empty || sample.bytes == 0) {
-            ++empty_frames;
-            continue;
-        }
-        if (sample.timestamp) {
-            if (first_ts && last_ts && fps > 0 && *sample.timestamp > *last_ts) {
-                const auto expected = 10'000'000ll / static_cast<std::int64_t>(fps);
-                if (expected > 0) {
-                    const auto gap = (*sample.timestamp - *last_ts) / expected;
-                    if (gap > 1 && gap < 1000) dropped += static_cast<std::uint64_t>(gap - 1);
-                }
+        if (FAILED(hr)) {
+            if (raw) raw->Release();
+            auto* slot = find_slot(actual);
+            if (slot) {
+                Sample sample;
+                sample.error = true;
+                account_sample(slot, sample);
             }
-            if (!first_ts) first_ts = sample.timestamp;
-            last_ts = sample.timestamp;
-            ++timestamped;
+            continue;
         }
-        bytes += sample.bytes;
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
+            if (raw) raw->Release();
+            for (auto& slot : slots) slot.stalled = true;
+            break;
+        }
+        auto* slot = find_slot(actual);
+        if (!slot) {
+            if (raw) raw->Release();
+            continue;
+        }
+        Sample sample;
+        if (flags & MF_SOURCE_READERF_ERROR) sample.error = true;
+        if (flags & MF_SOURCE_READERF_STREAMTICK) {
+            if (raw) raw->Release();
+            continue;
+        }
+        if (!raw) {
+            sample.empty = true;
+            account_sample(slot, sample);
+            continue;
+        }
+        sample.timestamp = timestamp;
+        IMFMediaBuffer* buffer = nullptr;
+        if (SUCCEEDED(raw->ConvertToContiguousBuffer(&buffer)) && buffer) {
+            DWORD length = 0;
+            buffer->GetCurrentLength(&length);
+            sample.bytes = length;
+            buffer->Release();
+        }
+        raw->Release();
+        if (sample.bytes == 0) sample.empty = true;
+        account_sample(slot, sample);
     }
+
     const auto elapsed = std::max<std::uint64_t>(elapsed_ns(started), 1);
-    const auto elapsed_s = static_cast<double>(elapsed) / 1e9;
-    const auto payload_frames = frames - std::min(frames, error_frames + empty_frames);
-    const double mean = payload_frames == 0 ? 0 : static_cast<double>(bytes) / static_cast<double>(payload_frames);
-    FrameStream stream;
-    stream.node = path;
-    stream.driver = "Media Foundation";
-    stream.card = opened.name;
-    stream.width = format.width;
-    stream.height = format.height;
-    stream.fourcc = format.fourcc;
-    stream.sizeimage = format.sizeimage;
-    stream.buffer_count = request.buffers;
-    stream.warmup_frames = request.warmup_frames;
-    stream.frames = frames;
-    stream.error_frames = error_frames;
-    stream.empty_frames = empty_frames;
-    stream.dropped_frames = dropped;
-    stream.bytes = bytes;
-    stream.elapsed_ns = elapsed;
-    stream.window_fps = static_cast<double>(frames) / elapsed_s;
-    stream.window_bytes_per_sec = static_cast<double>(bytes) / elapsed_s;
-    stream.mean_frame_bytes = mean;
-    stream.interval_source = timestamped > 0 ? "sample_time" : "userspace_read";
-    if (first_ts && last_ts && timestamped >= 2 && *last_ts > *first_ts) {
-        stream.driver_fps = static_cast<double>(timestamped - 1) * 1e7 / static_cast<double>(*last_ts - *first_ts);
+    std::vector<FrameStream> streams;
+    streams.reserve(slots.size());
+    const auto card_base = opened.name;
+    for (const auto& slot : slots) {
+        auto card = card_base;
+        if (slots.size() > 1) card += " 流" + std::to_string(slot.index);
+        streams.push_back(finish_slot(slot, request, elapsed, card));
     }
-    stream.stalled = stalled;
-    stream.role = resolved.role;
-    stream.verdict = detail::build_verdict(stream.window_fps, mean, resolved.min_fps, resolved.expect_frame_bytes);
-    return stream;
+    return streams;
 }
 
 NodeModes probe_node(const std::string& path) {
     ComApartment apartment;
     auto opened = open_reader(path);
+    const auto ref = parse_node(path);
+    const auto stream = resolve_stream_index(opened.source, opened.reader, ref);
+    select_only(opened.reader, {stream});
     NodeModes node;
     node.path = path;
     node.card = opened.name;
+    if (ref.stream) node.card += " 流" + std::to_string(stream);
     bool depth = false;
     bool color = false;
     bool infrared = false;
     for (DWORD index = 0;; ++index) {
         IMFMediaType* type = nullptr;
-        const HRESULT hr = opened.reader->GetNativeMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), index, &type);
+        const HRESULT hr = opened.reader->GetNativeMediaType(stream, index, &type);
         if (hr == MF_E_NO_MORE_TYPES) break;
         if (FAILED(hr) || !type) break;
         const auto info = read_type(type);
@@ -447,6 +640,20 @@ NodeModes probe_node(const std::string& path) {
     return node;
 }
 
+std::vector<std::string> expand_device_nodes(const VideoDevice& device) {
+    try {
+        auto opened = open_reader(device.link);
+        const auto streams = list_video_streams(opened.source, opened.reader);
+        if (streams.empty()) return {device.link};
+        if (streams.size() == 1) return {make_node(device.link, streams.front())};
+        std::vector<std::string> nodes;
+        for (const auto index : streams) nodes.push_back(make_node(device.link, index));
+        return nodes;
+    } catch (...) {
+        return {device.link};
+    }
+}
+
 }  // namespace
 
 bool is_v4l2_capture_node(const std::string& path) {
@@ -459,9 +666,79 @@ bool is_v4l2_capture_node(const std::string& path) {
 }
 
 StreamReport capture(const CaptureRequest& request) {
-    auto report = detail::capture_parallel(request, [](const CaptureRequest& req, const std::string& path, detail::Gate& configured,
-                                                       detail::Gate& measuring) { return capture_one(req, path, configured, measuring); });
-    report.notes.push_back("Windows 用 Media Foundation 读样本字节。队列深度参数不作用到采集缓冲。");
+    if (request.paths.empty()) throw Error("没有视频节点");
+    std::map<std::string, std::vector<std::string>> groups;
+    std::vector<SkippedNode> skipped;
+    for (const auto& path : request.paths) {
+        if (!is_v4l2_capture_node(path)) {
+            skipped.push_back(SkippedNode{path, "不是视频采集设备"});
+            continue;
+        }
+        groups[parse_node(path).link].push_back(path);
+    }
+    if (groups.empty()) {
+        std::string message;
+        for (const auto& item : skipped) {
+            if (!message.empty()) message += "; ";
+            message += item.node + ": " + item.reason;
+        }
+        throw Error(message.empty() ? "没有可采集的视频节点" : message);
+    }
+
+    auto configured = std::make_shared<detail::Gate>();
+    auto measuring = std::make_shared<detail::Gate>();
+    configured->total = static_cast<int>(groups.size());
+    measuring->total = static_cast<int>(groups.size());
+    std::mutex result_mutex;
+    std::vector<FrameStream> streams;
+    std::vector<std::thread> threads;
+    for (const auto& group : groups) {
+        threads.emplace_back([&, link = group.first, paths = group.second] {
+            try {
+                auto got = capture_device(request, link, paths, *configured, *measuring);
+                std::lock_guard lock(result_mutex);
+                streams.insert(streams.end(), std::make_move_iterator(got.begin()), std::make_move_iterator(got.end()));
+            } catch (const std::exception& err) {
+                configured->fail();
+                measuring->fail();
+                std::lock_guard lock(result_mutex);
+                for (const auto& path : paths) skipped.push_back(SkippedNode{path, err.what()});
+            }
+        });
+    }
+    for (auto& thread : threads) thread.join();
+
+    if (request.strict_nodes) {
+        std::size_t expected = 0;
+        for (const auto& path : request.paths) {
+            if (is_v4l2_capture_node(path)) ++expected;
+        }
+        if (streams.size() != expected) {
+            std::string message;
+            for (const auto& item : skipped) {
+                if (item.reason.find("不是视频采集") != std::string::npos) continue;
+                if (!message.empty()) message += "; ";
+                message += item.node + ": " + item.reason;
+            }
+            throw Error(message.empty() ? "采集节点未全部成功" : message);
+        }
+    }
+    if (streams.empty()) {
+        std::string message;
+        for (const auto& item : skipped) {
+            if (!message.empty()) message += "; ";
+            message += item.node + ": " + item.reason;
+        }
+        throw Error(message.empty() ? "没有采到视频" : message);
+    }
+
+    StreamReport report;
+    for (const auto& stream : streams) report.aggregate_bytes_per_sec += stream.window_bytes_per_sec;
+    report.streams = std::move(streams);
+    report.skipped = std::move(skipped);
+    report.timer_overhead_ns = *summarize(overhead_samples(200));
+    report.notes.insert(report.notes.end(), request.notes.begin(), request.notes.end());
+    report.notes.push_back("Windows 用 Media Foundation 读样本字节。同一设备上的多路视频在一个读取器里同时开流。队列深度参数不作用到采集缓冲。");
     return report;
 }
 
@@ -488,11 +765,17 @@ std::vector<NodeModes> describe_capture_nodes(const std::vector<std::string>& pa
 std::vector<std::string> capture_nodes_for_usb(std::uint16_t vendor, std::uint16_t product) {
     std::vector<std::string> nodes;
     try {
+        ComApartment apartment;
+        ensure_media();
         for (const auto& device : enumerate_sources()) {
-            if (device.vendor == vendor && device.product == product) nodes.push_back(device.link);
+            if (device.vendor != vendor || device.product != product) continue;
+            auto expanded = expand_device_nodes(device);
+            nodes.insert(nodes.end(), expanded.begin(), expanded.end());
         }
     } catch (...) {
     }
+    std::sort(nodes.begin(), nodes.end());
+    nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
     return nodes;
 }
 

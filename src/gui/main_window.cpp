@@ -432,7 +432,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     stream_btn_->setToolTip(QStringLiteral("按当前时长采集视频载荷"));
     stream_quick_btn_->setToolTip(QStringLiteral("3 次 × 5 秒，取得分最高的一次"));
     stream_stress_btn_->setToolTip(QStringLiteral("3 次 × 10 秒，浅队列，取得分最低的一次"));
-    rtt_btn_->setToolTip(QStringLiteral("GET_STATUS 控制传输回传"));
+    rtt_btn_->setToolTip(
+        QStringLiteral("GET_STATUS 控制传输回传。Windows 上需要 WinUSB；D405 等相机请保留 UVC 以便测视频，RTT 请换测试板或临时改驱动。"));
 
     auto* buttons = new QHBoxLayout;
     buttons->setSpacing(8);
@@ -786,11 +787,11 @@ void MainWindow::onMeasureRtt() {
     }
     setBusy(true);
     showStatus(QString(), false);
+    // Windows 上 hub 枚举的 bus/addr 可能和刷新瞬间不一致，RTT 只按 VID/PID 找设备。
     QMetaObject::invokeMethod(worker_, "measureRtt", Qt::QueuedConnection,
                               Q_ARG(quint16, static_cast<quint16>(device.value(QStringLiteral("vendor_id")).toUInt())),
                               Q_ARG(quint16, static_cast<quint16>(device.value(QStringLiteral("product_id")).toUInt())),
-                              Q_ARG(QString, device.value(QStringLiteral("bus_id")).toString()),
-                              Q_ARG(quint8, static_cast<quint8>(device.value(QStringLiteral("address")).toUInt())),
+                              Q_ARG(QString, QString()), Q_ARG(quint8, static_cast<quint8>(0)),
                               Q_ARG(quint32, static_cast<quint32>(rtt_count_box_->value())));
 }
 
@@ -913,8 +914,16 @@ void MainWindow::onDeviceChanged(int) {
         if (linkbench::is_v4l2_capture_node(node.toStdString())) capture_nodes << node;
     }
     if (capture_nodes.size() >= 2) node_box_->addItem(QStringLiteral("彩色+深度"), QStringLiteral("color-depth"));
-    for (const auto& node : capture_nodes) node_box_->addItem(node, node);
+    for (const auto& node : capture_nodes) {
+        QString label = node;
+        const auto marker = QStringLiteral("::mfstream=");
+        const int at = node.lastIndexOf(marker);
+        if (at >= 0) label = QStringLiteral("流%1").arg(node.mid(at + marker.size()));
+        node_box_->addItem(label, node);
+        node_box_->setItemData(node_box_->count() - 1, node, Qt::ToolTipRole);
+    }
     if (node_box_->count() == 0) node_box_->addItem(QStringLiteral("无采集节点"));
+    if (capture_nodes.size() >= 2) node_box_->setCurrentIndex(0);
     node_box_->blockSignals(false);
 
     const auto product = device.value(QStringLiteral("product")).toString();

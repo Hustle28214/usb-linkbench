@@ -141,7 +141,7 @@ void MeasureWorker::measureRtt(quint16 vendor_id, quint16 product_id, const QStr
         filter.vendor_id = vendor_id;
         filter.product_id = product_id;
         if (!bus_id.isEmpty()) filter.bus_id = bus_id.toStdString();
-        filter.address = address;
+        if (address != 0) filter.address = address;
         linkbench::RttOptions options;
         options.count = count;
         options.warmup = 20;

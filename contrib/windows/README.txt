@@ -12,7 +12,12 @@ usb-linkbench Windows x64
 
 ```powershell
 .\usb-linkbench.exe stream --device "\\?\usb#vid_2bc5&pid_....." --seconds 5
+
+# 彩色和深度同时满帧开流；深度取未压缩预算最高的一档，表上单列深度速率
+.\usb-linkbench.exe stream --vid 2bc5 --color-depth --seconds 5
 ```
+
+`list --cameras` 会把同一台相机的多路 Media Foundation 视频流拆成带 `::mfstream=N` 的节点。`--color-depth` 会同时选中彩色和深度。图形面板有两路及以上时默认选「彩色+深度」。
 
 视频走系统自带的 UVC 驱动，不要用 Zadig 把相机换成 WinUSB，换了之后 `stream` 就看不到这台相机。`rtt` 和 `bulk` 反过来，需要 WinUSB 才能打开设备；那两项测完想再测视频，得把驱动换回去。
 

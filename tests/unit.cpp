@@ -294,6 +294,10 @@ int main() {
     }
     CHECK(empty);
 
+    CHECK(linkbench::kind_of_fourcc("Y16 ") == linkbench::StreamKind::Depth);
+    CHECK(linkbench::kind_of_fourcc("yuyv") == linkbench::StreamKind::Color);
+    CHECK(linkbench::bytes_per_pixel_of("Z16 ") == 2);
+
     linkbench::VideoMode vga_depth{640, 480, "Z16", 30, 2};
     linkbench::VideoMode wide_depth{1280, 800, "Y16", 30, 2};
     linkbench::VideoMode fast_depth{640, 480, "Z16", 60, 2};

@@ -10,6 +10,7 @@
 #include <unistd.h>
 #endif
 
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -700,23 +701,34 @@ std::uint64_t VideoMode::payload_bytes_per_sec() const {
     return static_cast<std::uint64_t>(width) * height * bytes_per_pixel * fps;
 }
 
+namespace {
+
+std::string normalize_fourcc(std::string fourcc) {
+    while (!fourcc.empty() && (fourcc.back() == ' ' || fourcc.back() == '\0')) fourcc.pop_back();
+    for (auto& ch : fourcc) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    if (fourcc == "YUYV") return "YUY2";
+    return fourcc;
+}
+
+}  // namespace
+
 StreamKind kind_of_fourcc(const std::string& fourcc) {
-    if (fourcc == "Z16" || fourcc == "Y16" || fourcc == "W16" || fourcc == "INZI" || fourcc == "RW16") {
+    const auto code = normalize_fourcc(fourcc);
+    if (code == "Z16" || code == "Y16" || code == "W16" || code == "INZI" || code == "RW16") {
         return StreamKind::Depth;
     }
-    if (fourcc == "GREY" || fourcc == "Y8" || fourcc == "BA81") return StreamKind::Infrared;
-    if (fourcc == "MJPG" || fourcc == "JPEG" || fourcc == "YUYV" || fourcc == "YUY2" || fourcc == "NV12" ||
-        fourcc == "NV21" || fourcc == "RGB3" || fourcc == "BGR3") {
+    if (code == "GREY" || code == "Y8" || code == "Y8I" || code == "Y12I" || code == "BA81") return StreamKind::Infrared;
+    if (code == "MJPG" || code == "JPEG" || code == "YUY2" || code == "UYVY" || code == "NV12" || code == "NV21" ||
+        code == "RGB3" || code == "BGR3") {
         return StreamKind::Color;
     }
     return StreamKind::Unknown;
 }
 
 std::uint32_t bytes_per_pixel_of(const std::string& fourcc) {
-    if (fourcc == "Z16" || fourcc == "Y16" || fourcc == "W16" || fourcc == "RW16" || fourcc == "YUYV" || fourcc == "YUY2") {
-        return 2;
-    }
-    if (fourcc == "GREY" || fourcc == "Y8" || fourcc == "BA81") return 1;
+    const auto code = normalize_fourcc(fourcc);
+    if (code == "Z16" || code == "Y16" || code == "W16" || code == "RW16" || code == "YUY2" || code == "UYVY") return 2;
+    if (code == "GREY" || code == "Y8" || code == "Y8I" || code == "BA81") return 1;
     return 0;
 }
 
@@ -864,13 +876,19 @@ ColorDepthPlan plan_color_depth(const std::vector<NodeModes>& nodes, std::uint32
 
     const NodeModes* color_node = nullptr;
     VideoMode color_mode;
+    auto color_rank = [](const std::string& fourcc) {
+        const auto code = normalize_fourcc(fourcc);
+        if (code == "MJPG" || code == "JPEG") return 400;
+        if (code == "YUY2") return 300;
+        if (code == "NV12" || code == "NV21") return 200;
+        if (code == "UYVY") return 100;
+        return 50;
+    };
     for (const auto& node : nodes) {
         if (&node == depth_node || node.kind != StreamKind::Color || !node.error.empty()) continue;
         try {
             const auto mode = pick_color_mode(node.modes, depth_mode.fps, depth_mode.width, depth_mode.height);
-            const bool mjpg = compressed_color(mode.fourcc);
-            const bool have_mjpg = color_node && compressed_color(color_mode.fourcc);
-            if (!color_node || (mjpg && !have_mjpg)) {
+            if (!color_node || color_rank(mode.fourcc) > color_rank(color_mode.fourcc)) {
                 color_node = &node;
                 color_mode = mode;
             }

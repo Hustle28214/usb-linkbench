@@ -10,4 +10,5 @@
 /.toolchain
 /dist
 /build-win
+/build-mingw
 /third_party
